@@ -110,6 +110,8 @@ HELP_TEXT = """
 
 Важно:
 Оценка по фото может отличаться от реальности. Для максимальной точности используй весы и проверяй порции.
+
+Все команды: /commands
 """.strip()
 
 
@@ -305,6 +307,46 @@ def _admin_help_text() -> str:
     )
 
 
+def _commands_text(is_admin: bool = False) -> str:
+    text = (
+        "📚 Команды Dietnik\n\n"
+        "Основные:\n"
+        "/start — пройти настройку заново\n"
+        "/menu — главное меню\n"
+        "/today — прогресс за сегодня\n"
+        "/profile — профиль и дневная норма\n"
+        "/recommendations — рекомендации на сегодня\n"
+        "/subscription — тарифы и подписка\n"
+        "/help — как пользоваться\n"
+        "/commands — список команд\n\n"
+        "Premium:\n"
+        "/dietitian — AI-диетолог\n"
+        "/fridge — холодильник\n"
+        "/recipes — рецепты под остаток КБЖУ\n"
+        "/reports — недельные отчёты\n\n"
+        "Сервисные:\n"
+        "/reset_day — очистить сегодняшний дневник\n"
+        "/my_id — узнать свой Telegram ID"
+    )
+    if is_admin:
+        text += (
+            "\n\nАдмин:\n"
+            "/admin — меню админки\n"
+            "/admin_stats — статистика проекта\n"
+            "/admin_users [страница] — список пользователей\n"
+            "/admin_user <telegram_id> — карточка пользователя\n"
+            "/admin_grant_premium <telegram_id> [дней] — выдать Premium\n"
+            "/admin_revoke_premium <telegram_id> — снять Premium\n"
+            "/admin_reset_day <telegram_id> — очистить дневник пользователя\n"
+            "/admin_payments [кол-во] — последние платежи\n"
+            "/admin_message <telegram_id> <текст> — написать пользователю\n"
+            "/admin_broadcast — рассылка всем пользователям\n"
+            "/admin_cancel — отменить админ-действие\n"
+            "/admin_health — диагностика"
+        )
+    return text
+
+
 async def _send_dashboard(message: Message) -> None:
     user = get_user(message.from_user.id)
     if not user:
@@ -488,6 +530,14 @@ async def reset_day_handler(message: Message) -> None:
 @router.message(Command("help"))
 async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard())
+
+
+@router.message(Command("commands", "cmds", "команды"))
+async def commands_handler(message: Message) -> None:
+    await message.answer(
+        _commands_text(_is_admin(message)),
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 @router.message(Command("my_id", "myid", "id", "admin_id"))
@@ -1001,6 +1051,12 @@ async def plain_start_handler(message: Message, state: FSMContext) -> None:
 async def plain_my_id_handler(message: Message) -> None:
     """Help users who type ID commands without the slash."""
     await my_id_handler(message)
+
+
+@router.message(F.text.casefold().in_({"commands", "cmds", "команды"}))
+async def plain_commands_handler(message: Message) -> None:
+    """Help users who type commands without the slash."""
+    await commands_handler(message)
 
 
 @router.message(

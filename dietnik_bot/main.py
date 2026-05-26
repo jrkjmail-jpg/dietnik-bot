@@ -394,6 +394,21 @@ def _is_commands_request(text: str | None) -> bool:
     }
 
 
+def _storage_admin_command(text: str | None) -> str:
+    command = _normalize_command_text(text)
+    aliases = {
+        "dbstatus": "dbstatus",
+        "db_status": "dbstatus",
+        "storagecheck": "storagecheck",
+        "storage_check": "storagecheck",
+        "backupdb": "backupdb",
+        "backup_db": "backupdb",
+        "restoredb": "restoredb",
+        "restore_db": "restoredb",
+    }
+    return aliases.get(command, "")
+
+
 async def _send_dashboard(message: Message) -> None:
     user = get_user(message.from_user.id)
     if not user:
@@ -471,6 +486,26 @@ async def commands_handler(message: Message) -> None:
         reply_markup=main_menu_keyboard(),
         parse_mode=None,
     )
+
+
+@router.message(lambda message: bool(_storage_admin_command(message.text)))
+async def storage_admin_router(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Handle storage admin commands before FSM state handlers can intercept them."""
+    command = _storage_admin_command(message.text)
+    logger.info(
+        "Received storage admin command=%s from user_id=%s text=%r",
+        command,
+        message.from_user.id,
+        message.text,
+    )
+    if command == "dbstatus":
+        await dbstatus_handler(message)
+    elif command == "storagecheck":
+        await storagecheck_handler(message)
+    elif command == "backupdb":
+        await backupdb_handler(message, bot)
+    elif command == "restoredb":
+        await restoredb_handler(message, state)
 
 
 @router.message(Command("start"))

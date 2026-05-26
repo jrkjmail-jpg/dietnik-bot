@@ -26,6 +26,7 @@ from openai_service import analyze_food_photo
 
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class Onboarding(StatesGroup):
@@ -103,10 +104,12 @@ def _parse_float(text: str) -> float | None:
 
 @router.message(Command("start"))
 async def start_handler(message: Message, state: FSMContext) -> None:
+    logger.info("Received /start from user_id=%s", message.from_user.id)
     await state.clear()
     await message.answer(WELCOME_TEXT)
     await message.answer("Начнём настройку. Укажи пол:", reply_markup=gender_keyboard())
     await state.set_state(Onboarding.gender)
+    logger.info("Sent onboarding start to user_id=%s", message.from_user.id)
 
 
 @router.message(Onboarding.gender)
@@ -253,6 +256,12 @@ async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
+@router.message(F.text.casefold().in_({"start", "старт"}))
+async def plain_start_handler(message: Message, state: FSMContext) -> None:
+    """Help users who type start without the slash."""
+    await start_handler(message, state)
+
+
 @router.message(F.photo)
 async def photo_handler(message: Message, bot: Bot) -> None:
     user = get_user(message.from_user.id)
@@ -307,14 +316,17 @@ async def fallback_handler(message: Message) -> None:
 
 
 async def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+
     validate_config()
     init_db()
 
-    logging.basicConfig(level=logging.INFO)
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
 
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook deleted, starting polling")
     await dp.start_polling(bot)
 
 

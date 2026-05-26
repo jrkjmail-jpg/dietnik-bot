@@ -407,6 +407,7 @@ async def commands_handler(message: Message) -> None:
     await message.answer(
         _commands_text(_is_admin(message)),
         reply_markup=main_menu_keyboard(),
+        parse_mode=None,
     )
 
 
@@ -772,7 +773,7 @@ async def admin_handler(message: Message) -> None:
     if not _is_admin(message):
         await _deny_admin(message)
         return
-    await message.answer(_admin_help_text())
+    await message.answer(_admin_help_text(), parse_mode=None)
 
 
 @router.message(Command("admin_health"))
@@ -845,7 +846,7 @@ async def admin_user_handler(message: Message) -> None:
 
     telegram_id = _parse_user_id(_command_args(message))
     if not telegram_id:
-        await message.answer("Формат: /admin_user <telegram_id>")
+        await message.answer("Формат: /admin_user <telegram_id>", parse_mode=None)
         return
 
     user = get_user(telegram_id)
@@ -888,7 +889,10 @@ async def admin_grant_premium_handler(message: Message) -> None:
     telegram_id = _parse_user_id(args[0]) if args else None
     days = _parse_user_id(args[1]) if len(args) > 1 else MONTH_DAYS
     if not telegram_id or not days:
-        await message.answer("Формат: /admin_grant_premium <telegram_id> [дней]")
+        await message.answer(
+            "Формат: /admin_grant_premium <telegram_id> [дней]",
+            parse_mode=None,
+        )
         return
     if not get_user(telegram_id):
         await message.answer("Пользователь не найден. Он должен сначала пройти /start.")
@@ -907,7 +911,10 @@ async def admin_revoke_premium_handler(message: Message) -> None:
 
     telegram_id = _parse_user_id(_command_args(message))
     if not telegram_id:
-        await message.answer("Формат: /admin_revoke_premium <telegram_id>")
+        await message.answer(
+            "Формат: /admin_revoke_premium <telegram_id>",
+            parse_mode=None,
+        )
         return
     if not get_user(telegram_id):
         await message.answer("Пользователь не найден.")
@@ -925,7 +932,7 @@ async def admin_reset_day_handler(message: Message) -> None:
 
     telegram_id = _parse_user_id(_command_args(message))
     if not telegram_id:
-        await message.answer("Формат: /admin_reset_day <telegram_id>")
+        await message.answer("Формат: /admin_reset_day <telegram_id>", parse_mode=None)
         return
     reset_today(telegram_id)
     await message.answer(f"✅ Сегодняшний дневник пользователя {telegram_id} очищен.")
@@ -964,7 +971,10 @@ async def admin_message_handler(message: Message, bot: Bot) -> None:
     telegram_id = _parse_user_id(args[0]) if args else None
     text = args[1].strip() if len(args) > 1 else ""
     if not telegram_id or not text:
-        await message.answer("Формат: /admin_message <telegram_id> <текст>")
+        await message.answer(
+            "Формат: /admin_message <telegram_id> <текст>",
+            parse_mode=None,
+        )
         return
 
     try:
@@ -1185,6 +1195,7 @@ async def fallback_handler(message: Message) -> None:
             "Я пока не знаю такую команду.\n\n"
             f"{_commands_text(_is_admin(message))}",
             reply_markup=main_menu_keyboard(),
+            parse_mode=None,
         )
         return
 

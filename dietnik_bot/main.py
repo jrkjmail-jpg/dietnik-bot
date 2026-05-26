@@ -12,7 +12,6 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -348,6 +347,30 @@ def _commands_text(is_admin: bool = False) -> str:
     return text
 
 
+def _normalize_command_text(text: str | None) -> str:
+    if not text:
+        return ""
+    command = text.casefold().strip()
+    command = command.split(maxsplit=1)[0] if " " in command and not command.startswith("/ ") else command
+    command = command.replace(" ", "")
+    return command.lstrip("/")
+
+
+def _is_commands_request(text: str | None) -> bool:
+    return _normalize_command_text(text) in {
+        "commands",
+        "command",
+        "comands",
+        "comand",
+        "cmds",
+        "cmnds",
+        "команды",
+        "команд",
+        "список",
+        "списоккоманд",
+    }
+
+
 async def _send_dashboard(message: Message) -> None:
     user = get_user(message.from_user.id)
     if not user:
@@ -533,7 +556,7 @@ async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard())
 
 
-@router.message(Command("commands", "cmds", "cmnds", "команды"))
+@router.message(Command("commands", "command", "comands", "cmds", "cmnds", "команды"))
 async def commands_handler(message: Message) -> None:
     await message.answer(
         _commands_text(_is_admin(message)),
@@ -1067,22 +1090,9 @@ async def plain_my_id_handler(message: Message) -> None:
     await my_id_handler(message)
 
 
-@router.message(
-    F.text.casefold().in_(
-        {
-            "commands",
-            "/commands",
-            "cmds",
-            "/cmds",
-            "cmnds",
-            "/cmnds",
-            "команды",
-            "/команды",
-        }
-    )
-)
+@router.message(lambda message: _is_commands_request(message.text))
 async def plain_commands_handler(message: Message) -> None:
-    """Help users who type commands without the slash."""
+    """Send command list for slash, no-slash, and typo variants."""
     await commands_handler(message)
 
 
@@ -1198,19 +1208,6 @@ async def main() -> None:
     dp.include_router(router)
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_my_commands(
-        [
-            BotCommand(command="start", description="Настройка профиля"),
-            BotCommand(command="menu", description="Главное меню"),
-            BotCommand(command="commands", description="Все команды"),
-            BotCommand(command="today", description="Прогресс за сегодня"),
-            BotCommand(command="profile", description="Профиль"),
-            BotCommand(command="subscription", description="Подписка"),
-            BotCommand(command="recommendations", description="Рекомендации"),
-            BotCommand(command="my_id", description="Мой Telegram ID"),
-            BotCommand(command="help", description="Помощь"),
-        ]
-    )
     logger.info("Webhook deleted, starting polling")
     await dp.start_polling(bot)
 

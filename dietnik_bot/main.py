@@ -12,6 +12,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -532,7 +533,7 @@ async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard())
 
 
-@router.message(Command("commands", "cmds", "команды"))
+@router.message(Command("commands", "cmds", "cmnds", "команды"))
 async def commands_handler(message: Message) -> None:
     await message.answer(
         _commands_text(_is_admin(message)),
@@ -1053,7 +1054,7 @@ async def plain_my_id_handler(message: Message) -> None:
     await my_id_handler(message)
 
 
-@router.message(F.text.casefold().in_({"commands", "cmds", "команды"}))
+@router.message(F.text.casefold().in_({"commands", "cmds", "cmnds", "команды"}))
 async def plain_commands_handler(message: Message) -> None:
     """Help users who type commands without the slash."""
     await commands_handler(message)
@@ -1163,6 +1164,19 @@ async def main() -> None:
     dp.include_router(router)
 
     await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Настройка профиля"),
+            BotCommand(command="menu", description="Главное меню"),
+            BotCommand(command="commands", description="Все команды"),
+            BotCommand(command="today", description="Прогресс за сегодня"),
+            BotCommand(command="profile", description="Профиль"),
+            BotCommand(command="subscription", description="Подписка"),
+            BotCommand(command="recommendations", description="Рекомендации"),
+            BotCommand(command="my_id", description="Мой Telegram ID"),
+            BotCommand(command="help", description="Помощь"),
+        ]
+    )
     logger.info("Webhook deleted, starting polling")
     await dp.start_polling(bot)
 

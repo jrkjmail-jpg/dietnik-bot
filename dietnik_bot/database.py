@@ -1,11 +1,16 @@
 """SQLite storage for Dietnik users and meals."""
 
+import secrets
+import shutil
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from config import DB_PATH
+from config import DATA_DIR, DB_PATH, DB_PATH_EXPLICIT, LEGACY_DB_PATH
+
+
+STORAGE_PROBE_PATH = DATA_DIR / "storage_probe.txt"
 
 
 def _connect() -> sqlite3.Connection:
@@ -18,8 +23,28 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def ensure_data_dir() -> None:
+    """Create the persistent data directory before opening SQLite."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+
+def migrate_legacy_database() -> bool:
+    """Copy the old local SQLite database into persistent storage once."""
+    db_path = Path(DB_PATH)
+    legacy_path = Path(LEGACY_DB_PATH)
+    if db_path.exists() or not legacy_path.exists() or legacy_path.resolve() == db_path.resolve():
+        return False
+
+    shutil.copy2(legacy_path, db_path)
+    return True
+
+
 def init_db() -> None:
     """Create required tables if they do not exist."""
+    ensure_data_dir()
+    migrate_legacy_database()
+
     with _connect() as conn:
         conn.execute(
             """
@@ -36,6 +61,15 @@ def init_db() -> None:
                 norm_fat INTEGER,
                 norm_carbs INTEGER,
                 created_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT
             )
             """
         )
@@ -97,6 +131,31 @@ def _ensure_column(
     if column_name not in {column["name"] for column in columns}:
         conn.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+
+
+def get_app_state(key: str) -> Optional[str]:
+    """Read a small persisted app state value."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return str(row["value"]) if row else None
+
+
+def set_app_state(key: str, value: str) -> None:
+    """Persist a small app state value."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_state (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, _now()),
         )
 
 
@@ -340,6 +399,58 @@ def get_admin_stats() -> dict:
     }
 
 
+def get_db_status() -> dict:
+    """Return filesystem and aggregate DB status for admins."""
+    db_path = Path(DB_PATH)
+    db_exists = db_path.exists()
+    stats = get_admin_stats()
+    data_dir_resolved = Path(DATA_DIR).resolve()
+    db_resolved = db_path.resolve() if db_exists else db_path.parent.resolve() / db_path.name
+    try:
+        in_data_dir = db_resolved.is_relative_to(data_dir_resolved)
+    except AttributeError:
+        in_data_dir = str(db_resolved).startswith(str(data_dir_resolved))
+
+    return {
+        "db_path": str(db_path),
+        "db_exists": db_exists,
+        "db_size": db_path.stat().st_size if db_exists else 0,
+        "users_count": stats["users_count"],
+        "payments_count": stats["payments_count"],
+        "payments_amount": stats["payments_amount"],
+        "premium_users": stats["premium_users"],
+        "in_app_data": str(db_resolved).startswith("/app/data"),
+        "in_data_dir": in_data_dir,
+        "db_path_explicit": DB_PATH_EXPLICIT,
+    }
+
+
+def get_storage_probe_status() -> dict:
+    """Create/read a persistence probe token in DB and a file."""
+    token = get_app_state("storage_probe_token")
+    created_db_token = False
+    if not token:
+        token = secrets.token_hex(16)
+        set_app_state("storage_probe_token", token)
+        created_db_token = True
+
+    STORAGE_PROBE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    file_exists_before = STORAGE_PROBE_PATH.exists()
+    file_token = STORAGE_PROBE_PATH.read_text(encoding="utf-8").strip() if file_exists_before else ""
+    file_matches = file_token == token
+    if not file_exists_before or not file_matches:
+        STORAGE_PROBE_PATH.write_text(token, encoding="utf-8")
+
+    return {
+        "db_token": token,
+        "file_token": file_token,
+        "created_db_token": created_db_token,
+        "file_exists_before": file_exists_before,
+        "file_matches": file_matches,
+        "probe_path": str(STORAGE_PROBE_PATH),
+    }
+
+
 def reset_today(telegram_id: int) -> None:
     """Delete today's meals for a user."""
     with _connect() as conn:
@@ -409,3 +520,32 @@ def get_recent_payments(limit: int = 10) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def backup_database_file() -> Optional[Path]:
+    """Create a timestamped backup copy of the current DB file."""
+    db_path = Path(DB_PATH)
+    if not db_path.exists():
+        return None
+
+    backups_dir = Path(DATA_DIR) / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = backups_dir / f"bot_{timestamp}.db"
+    shutil.copy2(db_path, backup_path)
+    return backup_path
+
+
+def restore_database_file(uploaded_db_path: Path) -> Path:
+    """Validate and replace the current DB file, keeping a backup first."""
+    with sqlite3.connect(uploaded_db_path) as conn:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if integrity != "ok":
+            raise ValueError(f"SQLite integrity_check failed: {integrity}")
+
+    backup_path = backup_database_file()
+    db_path = Path(DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(uploaded_db_path, db_path)
+    init_db()
+    return backup_path or db_path

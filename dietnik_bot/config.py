@@ -7,14 +7,20 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "dietnik.sqlite3"
 
 load_dotenv(BASE_DIR / ".env")
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+DB_PATH_EXPLICIT = bool(os.getenv("DB_PATH"))
+DB_PATH = Path(os.getenv("DB_PATH", DATA_DIR / "bot.db"))
+PERSISTENCE_PATH = Path(os.getenv("PERSISTENCE_PATH", DATA_DIR / "bot_state.pkl"))
+LEGACY_DB_PATH = BASE_DIR / "dietnik.sqlite3"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
+AUTO_DB_BACKUP_INTERVAL_HOURS = int(os.getenv("AUTO_DB_BACKUP_INTERVAL_HOURS", "6"))
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = {
     int(admin_id.strip())

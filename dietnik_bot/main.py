@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import tempfile
 from datetime import date, datetime, timedelta
 from html import escape
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -13,6 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LabeledPrice,
@@ -22,17 +25,24 @@ from aiogram.types import (
 
 from config import (
     ADMIN_IDS,
+    AUTO_DB_BACKUP_INTERVAL_HOURS,
     BOT_TOKEN,
+    DATA_DIR,
+    DB_PATH,
     OPENAI_API_KEY,
     PAYMENT_PROVIDER_TOKEN,
+    PERSISTENCE_PATH,
     SUPPORT_USERNAME,
     validate_config,
 )
 from database import (
     get_admin_stats,
     get_all_user_ids,
+    get_app_state,
+    get_db_status,
     get_recent_payments,
     get_recent_meals,
+    get_storage_probe_status,
     get_today_stats,
     get_user,
     get_user_meals,
@@ -40,6 +50,8 @@ from database import (
     get_week_stats,
     init_db,
     reset_today,
+    restore_database_file,
+    set_app_state,
     save_subscription_payment,
     save_meal,
     save_user,
@@ -76,6 +88,7 @@ class Consultation(StatesGroup):
 
 class AdminPanel(StatesGroup):
     broadcast_text = State()
+    restore_db_file = State()
 
 
 BASIC_PRICE_RUB = 490
@@ -303,6 +316,11 @@ def _admin_help_text() -> str:
         "/admin_broadcast — рассылка всем пользователям\n"
         "/admin_cancel — отменить админ-действие\n"
         "/admin_health — диагностика конфига и БД\n\n"
+        "Хранилище:\n"
+        "/dbstatus — статус постоянной базы\n"
+        "/storagecheck — проверка сохранности /app/data\n"
+        "/backupdb — скачать текущую базу\n"
+        "/restoredb — восстановить базу из .db файла\n\n"
         "Чтобы узнать свой ID, отправь /my_id."
     )
 
@@ -342,7 +360,11 @@ def _commands_text(is_admin: bool = False) -> str:
             "/admin_message <telegram_id> <текст> — написать пользователю\n"
             "/admin_broadcast — рассылка всем пользователям\n"
             "/admin_cancel — отменить админ-действие\n"
-            "/admin_health — диагностика"
+            "/admin_health — диагностика\n"
+            "/dbstatus — статус постоянной базы\n"
+            "/storagecheck — проверка /app/data\n"
+            "/backupdb — скачать SQLite-базу\n"
+            "/restoredb — восстановить SQLite-базу"
         )
     return text
 
@@ -382,6 +404,46 @@ async def _send_dashboard(message: Message) -> None:
         _format_dashboard(user, stats, message.from_user.first_name),
         reply_markup=main_menu_keyboard(),
     )
+
+
+async def _send_db_backup(bot: Bot, chat_id: int, caption: str) -> bool:
+    db_path = Path(DB_PATH)
+    if not db_path.exists():
+        await bot.send_message(chat_id, f"База не найдена: {db_path}")
+        return False
+    await bot.send_document(
+        chat_id=chat_id,
+        document=FSInputFile(db_path),
+        caption=caption,
+    )
+    return True
+
+
+async def _maybe_auto_backup_db(bot: Bot, reason: str) -> None:
+    if AUTO_DB_BACKUP_INTERVAL_HOURS <= 0 or not ADMIN_IDS:
+        return
+
+    now = datetime.now()
+    last_raw = get_app_state("last_auto_db_backup_at")
+    if last_raw:
+        try:
+            last = datetime.fromisoformat(last_raw)
+            if now - last < timedelta(hours=AUTO_DB_BACKUP_INTERVAL_HOURS):
+                return
+        except ValueError:
+            pass
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await _send_db_backup(
+                bot,
+                admin_id,
+                f"Автобэкап базы Dietnik\nПричина: {reason}\nВремя: {now.isoformat(timespec='seconds')}",
+            )
+        except Exception as exc:
+            logger.warning("Auto DB backup failed for admin_id=%s: %s", admin_id, exc)
+
+    set_app_state("last_auto_db_backup_at", now.isoformat(timespec="seconds"))
 
 
 def _parse_int(text: str) -> int | None:
@@ -745,7 +807,7 @@ async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
 
 
 @router.message(F.successful_payment)
-async def successful_payment_handler(message: Message) -> None:
+async def successful_payment_handler(message: Message, bot: Bot) -> None:
     payment = message.successful_payment
     plan = "premium" if "premium" in payment.invoice_payload else "basic"
     premium_until = None
@@ -766,6 +828,7 @@ async def successful_payment_handler(message: Message) -> None:
         f"Тариф {_subscription_name(get_user(message.from_user.id) or {})} активирован.",
         reply_markup=main_menu_keyboard(),
     )
+    await _maybe_auto_backup_db(bot, "successful_payment")
 
 
 @router.message(Command("admin", "admin_help"))
@@ -788,8 +851,94 @@ async def admin_health_handler(message: Message) -> None:
         f"ADMIN_IDS настроены: {'да' if ADMIN_IDS else 'нет'}\n"
         f"OpenAI ключ: {'есть' if OPENAI_API_KEY else 'нет'}\n"
         f"Оплата: {'подключена' if PAYMENT_PROVIDER_TOKEN else 'не подключена'}\n"
+        f"DATA_DIR: {DATA_DIR}\n"
+        f"DB_PATH: {DB_PATH}\n"
+        f"PERSISTENCE_PATH: {PERSISTENCE_PATH}\n"
         f"Пользователей в БД: {stats['users_count']}\n"
         f"Приёмов пищи в БД: {stats['meals_count']}"
+    )
+
+
+@router.message(Command("dbstatus"))
+async def dbstatus_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    status = get_db_status()
+    size_kb = round(status["db_size"] / 1024, 2)
+    payments_rub = status["payments_amount"] // 100
+    await message.answer(
+        "🗄 Статус базы\n\n"
+        f"Путь базы: {status['db_path']}\n"
+        f"Файл существует: {'да' if status['db_exists'] else 'нет'}\n"
+        f"Размер: {status['db_size']} байт ({size_kb} KB)\n"
+        f"Пользователей: {status['users_count']}\n"
+        f"Платежей/заказов: {status['payments_count']}\n"
+        f"Общая сумма покупок: {payments_rub} ₽\n"
+        f"Premium пользователей: {status['premium_users']}\n"
+        f"База лежит в /app/data: {'да' if status['in_app_data'] else 'нет'}\n"
+        f"База лежит в DATA_DIR: {'да' if status['in_data_dir'] else 'нет'}\n"
+        f"DB_PATH задан явно: {'да' if status['db_path_explicit'] else 'нет'}\n"
+        f"DATA_DIR: {DATA_DIR}\n"
+        f"PERSISTENCE_PATH: {PERSISTENCE_PATH}",
+        parse_mode=None,
+    )
+
+
+@router.message(Command("storagecheck"))
+async def storagecheck_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    status = get_storage_probe_status()
+    if status["created_db_token"]:
+        verdict = "Создан новый DB-токен. Запусти команду ещё раз после redeploy."
+    elif not status["file_exists_before"]:
+        verdict = "Файл проверки отсутствовал и был создан заново. Проверь после redeploy."
+    elif not status["file_matches"]:
+        verdict = "Токен в файле отличался от токена в БД. Хранилище надо проверить."
+    else:
+        verdict = "OK: DB-токен и файл совпадают."
+
+    await message.answer(
+        "🧪 Проверка постоянного хранилища\n\n"
+        f"Вердикт: {verdict}\n"
+        f"DB token: {status['db_token']}\n"
+        f"File token: {status['file_token'] or '-'}\n"
+        f"Файл был на месте: {'да' if status['file_exists_before'] else 'нет'}\n"
+        f"Путь файла: {status['probe_path']}\n\n"
+        "После redeploy команда должна показать тот же DB token и совпадение файла.",
+        parse_mode=None,
+    )
+
+
+@router.message(Command("backupdb"))
+async def backupdb_handler(message: Message, bot: Bot) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    await _send_db_backup(
+        bot,
+        message.chat.id,
+        f"Ручной бэкап базы Dietnik\nDB_PATH: {DB_PATH}\nВремя: {datetime.now().isoformat(timespec='seconds')}",
+    )
+
+
+@router.message(Command("restoredb"))
+async def restoredb_handler(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    await state.set_state(AdminPanel.restore_db_file)
+    await message.answer(
+        "♻️ Пришли SQLite-файл .db одним документом.\n\n"
+        "Перед заменой текущая база будет сохранена в /app/data/backups.\n"
+        "Отмена: /admin_cancel",
+        parse_mode=None,
     )
 
 
@@ -880,7 +1029,7 @@ async def admin_user_handler(message: Message) -> None:
 
 
 @router.message(Command("admin_grant_premium"))
-async def admin_grant_premium_handler(message: Message) -> None:
+async def admin_grant_premium_handler(message: Message, bot: Bot) -> None:
     if not _is_admin(message):
         await _deny_admin(message)
         return
@@ -901,10 +1050,11 @@ async def admin_grant_premium_handler(message: Message) -> None:
     premium_until = (datetime.now() + timedelta(days=days)).date().isoformat()
     set_subscription(telegram_id, "premium", premium_until)
     await message.answer(f"✅ Premium выдан пользователю {telegram_id} до {premium_until}.")
+    await _maybe_auto_backup_db(bot, "admin_grant_premium")
 
 
 @router.message(Command("admin_revoke_premium"))
-async def admin_revoke_premium_handler(message: Message) -> None:
+async def admin_revoke_premium_handler(message: Message, bot: Bot) -> None:
     if not _is_admin(message):
         await _deny_admin(message)
         return
@@ -922,6 +1072,7 @@ async def admin_revoke_premium_handler(message: Message) -> None:
 
     set_subscription(telegram_id, "basic", None)
     await message.answer(f"✅ Пользователь {telegram_id} переведён на Basic.")
+    await _maybe_auto_backup_db(bot, "admin_revoke_premium")
 
 
 @router.message(Command("admin_reset_day"))
@@ -1005,6 +1156,51 @@ async def admin_cancel_handler(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer("Админ-действие отменено.")
+
+
+@router.message(AdminPanel.restore_db_file, F.document)
+async def restoredb_file_handler(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    document = message.document
+    if not document:
+        await message.answer("Пришли базу как документ .db или /admin_cancel.")
+        return
+
+    filename = document.file_name or ""
+    if not filename.endswith((".db", ".sqlite", ".sqlite3")):
+        await message.answer("Файл должен быть SQLite-базой: .db, .sqlite или .sqlite3.")
+        return
+
+    temp_path = Path(tempfile.gettempdir()) / f"dietnik_restore_{message.from_user.id}_{document.file_unique_id}.db"
+    try:
+        file = await bot.get_file(document.file_id)
+        await bot.download_file(file.file_path, destination=temp_path)
+        backup_path = restore_database_file(temp_path)
+    except Exception as exc:
+        await message.answer(f"Не получилось восстановить базу: {exc}", parse_mode=None)
+        return
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    await state.clear()
+    await message.answer(
+        "✅ База восстановлена.\n\n"
+        f"Старая база сохранена как: {backup_path}\n"
+        f"Текущая база: {DB_PATH}",
+        parse_mode=None,
+    )
+
+
+@router.message(AdminPanel.restore_db_file)
+async def restoredb_waiting_file_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+    await message.answer("Пришли SQLite-файл как документ или отправь /admin_cancel.")
 
 
 @router.message(AdminPanel.broadcast_text)

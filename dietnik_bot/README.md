@@ -74,6 +74,10 @@ OPENAI_API_KEY=твой_openai_api_key
 PAYMENT_PROVIDER_TOKEN=токен_платежного_провайдера_если_подключаешь_оплату
 SUPPORT_USERNAME=@твой_аккаунт_поддержки
 ADMIN_IDS=твой_telegram_id
+DATA_DIR=/app/data
+DB_PATH=/app/data/bot.db
+PERSISTENCE_PATH=/app/data/bot_state.pkl
+AUTO_DB_BACKUP_INTERVAL_HOURS=6
 ```
 
 ### Где взять Telegram bot token
@@ -112,8 +116,34 @@ python3 main.py
 - Рабочая директория: `dietnik_bot`, если Bothost даёт такое поле
 - Команда запуска: `python3 main.py`
 - Переменные окружения: `BOT_TOKEN`, `OPENAI_API_KEY`
+- Постоянное хранилище:
+  - `DATA_DIR=/app/data`
+  - `DB_PATH=/app/data/bot.db`
+  - `PERSISTENCE_PATH=/app/data/bot_state.pkl`
 - Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN`, когда подключишь Telegram Payments
 - Для админки: добавь `ADMIN_IDS`, например `123456789` или несколько ID через запятую
+- Для автобэкапа: `AUTO_DB_BACKUP_INTERVAL_HOURS=6`
+
+### Постоянная база на Bothost
+
+Все важные данные должны жить в `/app/data`. Бот берёт путь к SQLite из `DB_PATH`, поэтому на Bothost укажи:
+
+```env
+DATA_DIR=/app/data
+DB_PATH=/app/data/bot.db
+PERSISTENCE_PATH=/app/data/bot_state.pkl
+```
+
+При запуске бот создаёт папку `/app/data`, если её нет. Если рядом с кодом осталась старая база `dietnik.sqlite3`, а `/app/data/bot.db` ещё нет, бот аккуратно скопирует старую базу в постоянное хранилище.
+
+После redeploy проверь:
+
+```text
+/dbstatus
+/storagecheck
+```
+
+`/storagecheck` создаёт один и тот же контрольный токен в базе и в файле `/app/data/storage_probe.txt`. После redeploy токен должен остаться прежним.
 
 ## Команды
 
@@ -154,6 +184,10 @@ python3 main.py
 - `/admin_broadcast` — рассылка всем пользователям с подтверждением
 - `/admin_cancel` — отменить админ-действие
 - `/admin_health` — диагностика конфига и базы
+- `/dbstatus` — путь базы, размер, пользователи, платежи и проверка `/app/data`
+- `/storagecheck` — контрольный токен постоянного хранилища
+- `/backupdb` — отправить текущую SQLite-базу администратору
+- `/restoredb` — восстановить базу из `.db` файла
 
 ## Тарифы
 

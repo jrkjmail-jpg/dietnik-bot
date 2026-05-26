@@ -81,3 +81,43 @@ async def analyze_food_photo(file_url: str) -> Optional[dict]:
     except Exception:
         # The bot should keep working even if OpenAI is unavailable or responds badly.
         return None
+
+
+async def ask_dietitian(question: str, user: dict, stats: dict) -> str:
+    """Return a concise nutrition answer based on user's profile and day stats."""
+    try:
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты Dietnik, дружелюбный AI-диетолог и повар. "
+                        "Отвечай на русском, коротко, практично и без медицинских диагнозов. "
+                        "Если вопрос про болезнь, беременность, лекарства или РПП, советуй обратиться к врачу."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Профиль: цель {user['goal']}, возраст {user['age']}, "
+                        f"рост {user['height']} см, вес {user['weight']} кг. "
+                        f"Норма: {user['norm_calories']} ккал, "
+                        f"Б {user['norm_protein']} г, Ж {user['norm_fat']} г, "
+                        f"У {user['norm_carbs']} г. "
+                        f"Сегодня: {stats['calories']} ккал, Б {stats['protein']} г, "
+                        f"Ж {stats['fat']} г, У {stats['carbs']} г.\n\n"
+                        f"Вопрос пользователя: {question}"
+                    ),
+                },
+            ],
+            temperature=0.4,
+            max_tokens=450,
+        )
+        content = response.choices[0].message.content
+        if not content:
+            return "Не получилось подготовить ответ. Попробуй задать вопрос чуть проще."
+        return content.strip()
+    except Exception:
+        return "Не получилось связаться с AI-диетологом. Попробуй ещё раз чуть позже."

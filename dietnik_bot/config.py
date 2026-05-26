@@ -13,6 +13,8 @@ load_dotenv(BASE_DIR / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
 
 
 def validate_config() -> None:

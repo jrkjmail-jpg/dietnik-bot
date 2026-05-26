@@ -8,9 +8,14 @@ Dietnik — Telegram-бот диетолог. Пользователь отпр�
 - Расчёт дневной нормы КБЖУ по формуле Mifflin-St Jeor
 - Анализ фото еды через OpenAI
 - Сохранение приёмов пищи в SQLite
+- Главное меню с кнопками
 - Прогресс за день через `/today`
 - Профиль через `/profile`
 - Сброс сегодняшнего дневника через `/reset_day`
+- Рекомендации на день
+- AI-диетолог для Premium
+- Тарифы Basic и Premium
+- Заготовка Telegram Payments через `PAYMENT_PROVIDER_TOKEN`
 
 ## Установка Python на Mac
 
@@ -66,6 +71,8 @@ cp .env.example .env
 ```env
 BOT_TOKEN=твой_telegram_bot_token
 OPENAI_API_KEY=твой_openai_api_key
+PAYMENT_PROVIDER_TOKEN=токен_платежного_провайдера_если_подключаешь_оплату
+SUPPORT_USERNAME=@твой_аккаунт_поддержки
 ```
 
 ### Где взять Telegram bot token
@@ -103,15 +110,44 @@ python3 main.py
 - Ветка: `main`
 - Рабочая директория: `dietnik_bot`, если Bothost даёт такое поле
 - Команда запуска: `python3 main.py`
-- Переменные окружения: `BOT_TOKEN` и `OPENAI_API_KEY`
+- Переменные окружения: `BOT_TOKEN`, `OPENAI_API_KEY`
+- Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN`, когда подключишь Telegram Payments
 
 ## Команды
 
 - `/start` — начать настройку заново
+- `/menu` — главное меню
 - `/profile` — показать профиль и дневную норму
 - `/today` — показать прогресс за сегодня
 - `/reset_day` — удалить сегодняшние приёмы пищи
+- `/recommendations` — рекомендации на сегодня
+- `/dietitian` — AI-диетолог для Premium
+- `/subscription` — тарифы и оплата
+- `/fridge` — холодильник для Premium
+- `/recipes` — рецепты под остаток КБЖУ для Premium
+- `/reports` — недельные отчёты для Premium
 - `/help` — показать инструкцию
+
+## Тарифы
+
+### Basic — 490 ₽/мес
+
+- Дневник питания
+- Фото-учёт еды
+- AI-анализ КБЖУ
+- Дневная цель
+- Короткие рекомендации
+
+### Premium — 890 ₽/мес
+
+- Всё из Basic
+- AI-диетолог в формате вопрос-ответ
+- Холодильник
+- Рецепты под остаток КБЖУ
+- Отчёты
+- Прогресс тела
+
+Пока `PAYMENT_PROVIDER_TOKEN` не задан, бот показывает тарифы, но не выставляет счёт.
 
 ## Важно
 

@@ -15,6 +15,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = {
+    int(admin_id.strip())
+    for admin_id in ADMIN_IDS_RAW.split(",")
+    if admin_id.strip().isdigit()
+}
 
 
 def validate_config() -> None:

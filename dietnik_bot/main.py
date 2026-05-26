@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from datetime import date, datetime, timedelta
+from html import escape
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -10,13 +11,32 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 
-from config import BOT_TOKEN, PAYMENT_PROVIDER_TOKEN, SUPPORT_USERNAME, validate_config
+from config import (
+    ADMIN_IDS,
+    BOT_TOKEN,
+    OPENAI_API_KEY,
+    PAYMENT_PROVIDER_TOKEN,
+    SUPPORT_USERNAME,
+    validate_config,
+)
 from database import (
+    get_admin_stats,
+    get_all_user_ids,
+    get_recent_payments,
     get_recent_meals,
     get_today_stats,
     get_user,
+    get_user_meals,
+    get_users_page,
     get_week_stats,
     init_db,
     reset_today,
@@ -52,6 +72,10 @@ class Onboarding(StatesGroup):
 
 class Consultation(StatesGroup):
     question = State()
+
+
+class AdminPanel(StatesGroup):
+    broadcast_text = State()
 
 
 BASIC_PRICE_RUB = 490
@@ -232,6 +256,52 @@ def _premium_required_text() -> str:
         "🌿 Эта функция входит в Premium.\n\n"
         "Premium открывает холодильник, рецепты под остаток КБЖУ, отчёты и расширенного AI-диетолога.\n"
         "Открой раздел «💳 Подписка», чтобы посмотреть тарифы."
+    )
+
+
+def _is_admin(message: Message | CallbackQuery) -> bool:
+    user = message.from_user
+    return bool(user and user.id in ADMIN_IDS)
+
+
+async def _deny_admin(message: Message) -> None:
+    await message.answer("⛔ Команда доступна только администратору.")
+
+
+def _command_args(message: Message) -> str:
+    if not message.text:
+        return ""
+    parts = message.text.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _parse_user_id(value: str) -> int | None:
+    value = value.strip()
+    if value.startswith("@"):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _admin_help_text() -> str:
+    return (
+        "🛠 Админ-панель Dietnik\n\n"
+        "Команды:\n"
+        "/admin — это меню\n"
+        "/admin_stats — статистика проекта\n"
+        "/admin_users [страница] — список пользователей\n"
+        "/admin_user <telegram_id> — карточка пользователя\n"
+        "/admin_grant_premium <telegram_id> [дней] — выдать Premium\n"
+        "/admin_revoke_premium <telegram_id> — снять Premium\n"
+        "/admin_reset_day <telegram_id> — очистить дневник за сегодня\n"
+        "/admin_payments [кол-во] — последние платежи\n"
+        "/admin_message <telegram_id> <текст> — написать пользователю\n"
+        "/admin_broadcast — рассылка всем пользователям\n"
+        "/admin_cancel — отменить админ-действие\n"
+        "/admin_health — диагностика конфига и БД\n\n"
+        "Чтобы узнать свой ID, отправь /my_id."
     )
 
 
@@ -418,6 +488,14 @@ async def reset_day_handler(message: Message) -> None:
 @router.message(Command("help"))
 async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard())
+
+
+@router.message(Command("my_id"))
+async def my_id_handler(message: Message) -> None:
+    await message.answer(
+        f"Твой Telegram ID:\n<code>{message.from_user.id}</code>\n\n"
+        "Добавь его в Bothost в переменную ADMIN_IDS, чтобы открыть админ-команды."
+    )
 
 
 @router.message(Command("menu"))
@@ -610,6 +688,307 @@ async def successful_payment_handler(message: Message) -> None:
         f"Тариф {_subscription_name(get_user(message.from_user.id) or {})} активирован.",
         reply_markup=main_menu_keyboard(),
     )
+
+
+@router.message(Command("admin", "admin_help"))
+async def admin_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+    await message.answer(_admin_help_text())
+
+
+@router.message(Command("admin_health"))
+async def admin_health_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    stats = get_admin_stats()
+    await message.answer(
+        "🩺 Диагностика\n\n"
+        f"ADMIN_IDS настроены: {'да' if ADMIN_IDS else 'нет'}\n"
+        f"OpenAI ключ: {'есть' if OPENAI_API_KEY else 'нет'}\n"
+        f"Оплата: {'подключена' if PAYMENT_PROVIDER_TOKEN else 'не подключена'}\n"
+        f"Пользователей в БД: {stats['users_count']}\n"
+        f"Приёмов пищи в БД: {stats['meals_count']}"
+    )
+
+
+@router.message(Command("admin_stats"))
+async def admin_stats_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    stats = get_admin_stats()
+    payments_rub = stats["payments_amount"] // 100
+    await message.answer(
+        "📊 Статистика Dietnik\n\n"
+        f"Пользователи: {stats['users_count']}\n"
+        f"Premium: {stats['premium_users']}\n"
+        f"Активны сегодня: {stats['active_today']}\n"
+        f"Приёмов пищи сегодня: {stats['meals_today']}\n"
+        f"Приёмов пищи всего: {stats['meals_count']}\n"
+        f"Платежей: {stats['payments_count']}\n"
+        f"Выручка: {payments_rub} ₽"
+    )
+
+
+@router.message(Command("admin_users"))
+async def admin_users_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    page = _parse_user_id(_command_args(message)) or 1
+    page = max(1, page)
+    limit = 10
+    users = get_users_page(limit=limit, offset=(page - 1) * limit)
+    if not users:
+        await message.answer("Пользователи не найдены.")
+        return
+
+    lines = [f"👥 Пользователи, страница {page}\n"]
+    for user in users:
+        plan = user.get("subscription_plan") or "basic"
+        lines.append(
+            f"<code>{user['telegram_id']}</code> · {plan} · "
+            f"{user.get('goal') or 'без цели'} · {user.get('created_at') or '-'}"
+        )
+    lines.append("\nКарточка: /admin_user telegram_id")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("admin_user"))
+async def admin_user_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    telegram_id = _parse_user_id(_command_args(message))
+    if not telegram_id:
+        await message.answer("Формат: /admin_user <telegram_id>")
+        return
+
+    user = get_user(telegram_id)
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
+
+    stats = get_today_stats(telegram_id)
+    meals = get_user_meals(telegram_id, limit=5)
+    meals_text = "\n".join(
+        f"• {meal['date']} · {escape(meal['dish_name'])} · {meal['calories']} ккал"
+        for meal in meals
+    )
+    if not meals_text:
+        meals_text = "Нет записей."
+
+    await message.answer(
+        "👤 Карточка пользователя\n\n"
+        f"ID: <code>{telegram_id}</code>\n"
+        f"Тариф: {_subscription_name(user)}\n"
+        f"Premium до: {user.get('premium_until') or '-'}\n"
+        f"Цель: {user['goal']}\n"
+        f"Возраст: {user['age']}\n"
+        f"Рост: {user['height']} см\n"
+        f"Вес: {user['weight']} кг\n"
+        f"Активность: {user['activity']}\n\n"
+        f"Сегодня: {stats['calories']} ккал · Б {stats['protein']} · "
+        f"Ж {stats['fat']} · У {stats['carbs']}\n\n"
+        f"Последние записи:\n{meals_text}"
+    )
+
+
+@router.message(Command("admin_grant_premium"))
+async def admin_grant_premium_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    args = _command_args(message).split()
+    telegram_id = _parse_user_id(args[0]) if args else None
+    days = _parse_user_id(args[1]) if len(args) > 1 else MONTH_DAYS
+    if not telegram_id or not days:
+        await message.answer("Формат: /admin_grant_premium <telegram_id> [дней]")
+        return
+    if not get_user(telegram_id):
+        await message.answer("Пользователь не найден. Он должен сначала пройти /start.")
+        return
+
+    premium_until = (datetime.now() + timedelta(days=days)).date().isoformat()
+    set_subscription(telegram_id, "premium", premium_until)
+    await message.answer(f"✅ Premium выдан пользователю {telegram_id} до {premium_until}.")
+
+
+@router.message(Command("admin_revoke_premium"))
+async def admin_revoke_premium_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    telegram_id = _parse_user_id(_command_args(message))
+    if not telegram_id:
+        await message.answer("Формат: /admin_revoke_premium <telegram_id>")
+        return
+    if not get_user(telegram_id):
+        await message.answer("Пользователь не найден.")
+        return
+
+    set_subscription(telegram_id, "basic", None)
+    await message.answer(f"✅ Пользователь {telegram_id} переведён на Basic.")
+
+
+@router.message(Command("admin_reset_day"))
+async def admin_reset_day_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    telegram_id = _parse_user_id(_command_args(message))
+    if not telegram_id:
+        await message.answer("Формат: /admin_reset_day <telegram_id>")
+        return
+    reset_today(telegram_id)
+    await message.answer(f"✅ Сегодняшний дневник пользователя {telegram_id} очищен.")
+
+
+@router.message(Command("admin_payments"))
+async def admin_payments_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    limit = _parse_user_id(_command_args(message)) or 10
+    limit = min(max(limit, 1), 50)
+    payments = get_recent_payments(limit)
+    if not payments:
+        await message.answer("Платежей пока нет.")
+        return
+
+    lines = ["💳 Последние платежи\n"]
+    for payment in payments:
+        amount_rub = int(payment["amount"]) // 100
+        lines.append(
+            f"<code>{payment['telegram_id']}</code> · {payment['plan']} · "
+            f"{amount_rub} {payment['currency']} · {payment['created_at']}"
+        )
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("admin_message"))
+async def admin_message_handler(message: Message, bot: Bot) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    args = _command_args(message).split(maxsplit=1)
+    telegram_id = _parse_user_id(args[0]) if args else None
+    text = args[1].strip() if len(args) > 1 else ""
+    if not telegram_id or not text:
+        await message.answer("Формат: /admin_message <telegram_id> <текст>")
+        return
+
+    try:
+        await bot.send_message(telegram_id, text, parse_mode=None)
+    except Exception as exc:
+        await message.answer(f"Не получилось отправить сообщение: {exc}")
+        return
+    await message.answer(f"✅ Сообщение отправлено пользователю {telegram_id}.")
+
+
+@router.message(Command("admin_broadcast"))
+async def admin_broadcast_handler(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    await state.set_state(AdminPanel.broadcast_text)
+    await message.answer(
+        "📣 Пришли текст рассылки одним сообщением.\n\n"
+        "Отмена: /admin_cancel"
+    )
+
+
+@router.message(Command("admin_cancel"))
+async def admin_cancel_handler(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+    await state.clear()
+    await message.answer("Админ-действие отменено.")
+
+
+@router.message(AdminPanel.broadcast_text)
+async def admin_broadcast_text_handler(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    broadcast_text = message.text or ""
+    if len(broadcast_text) < 2:
+        await message.answer("Текст слишком короткий. Пришли нормальное сообщение или /admin_cancel.")
+        return
+
+    await state.update_data(broadcast_text=broadcast_text)
+    users_count = len(get_all_user_ids())
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Отправить", callback_data="admin_broadcast_confirm"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="admin_broadcast_cancel"),
+            ]
+        ]
+    )
+    await message.answer(
+        "Предпросмотр рассылки:\n\n"
+        f"{escape(broadcast_text)}\n\n"
+        f"Получателей: {users_count}",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(F.data.in_({"admin_broadcast_confirm", "admin_broadcast_cancel"}))
+async def admin_broadcast_callback_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    if not _is_admin(callback):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    if callback.data == "admin_broadcast_cancel":
+        await state.clear()
+        await callback.message.answer("Рассылка отменена.")
+        await callback.answer()
+        return
+
+    data = await state.get_data()
+    broadcast_text = data.get("broadcast_text")
+    if not broadcast_text:
+        await callback.message.answer("Текст рассылки не найден. Запусти /admin_broadcast заново.")
+        await callback.answer()
+        return
+
+    sent = 0
+    failed = 0
+    for telegram_id in get_all_user_ids():
+        try:
+            await bot.send_message(telegram_id, broadcast_text, parse_mode=None)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+
+    await state.clear()
+    await callback.message.answer(
+        "✅ Рассылка завершена.\n\n"
+        f"Отправлено: {sent}\n"
+        f"Ошибок: {failed}"
+    )
+    await callback.answer()
 
 
 @router.message(F.text.casefold().in_({"start", "старт"}))

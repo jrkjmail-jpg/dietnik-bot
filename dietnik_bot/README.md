@@ -73,6 +73,7 @@ BOT_TOKEN=твой_telegram_bot_token
 OPENAI_API_KEY=твой_openai_api_key
 PAYMENT_PROVIDER_TOKEN=токен_платежного_провайдера_если_подключаешь_оплату
 SUPPORT_USERNAME=@твой_аккаунт_поддержки
+ADMIN_IDS=твой_telegram_id
 ```
 
 ### Где взять Telegram bot token
@@ -112,6 +113,7 @@ python3 main.py
 - Команда запуска: `python3 main.py`
 - Переменные окружения: `BOT_TOKEN`, `OPENAI_API_KEY`
 - Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN`, когда подключишь Telegram Payments
+- Для админки: добавь `ADMIN_IDS`, например `123456789` или несколько ID через запятую
 
 ## Команды
 
@@ -127,6 +129,31 @@ python3 main.py
 - `/recipes` — рецепты под остаток КБЖУ для Premium
 - `/reports` — недельные отчёты для Premium
 - `/help` — показать инструкцию
+
+## Админ-команды
+
+Админка работает только для пользователей, чьи Telegram ID указаны в переменной `ADMIN_IDS`.
+
+Чтобы узнать свой ID, отправь боту:
+
+```text
+/my_id
+```
+
+Команды администратора:
+
+- `/admin` — справка по админке
+- `/admin_stats` — статистика проекта
+- `/admin_users [страница]` — список пользователей
+- `/admin_user <telegram_id>` — карточка пользователя
+- `/admin_grant_premium <telegram_id> [дней]` — выдать Premium
+- `/admin_revoke_premium <telegram_id>` — снять Premium
+- `/admin_reset_day <telegram_id>` — очистить дневник пользователя за сегодня
+- `/admin_payments [кол-во]` — последние платежи
+- `/admin_message <telegram_id> <текст>` — написать пользователю от имени бота
+- `/admin_broadcast` — рассылка всем пользователям с подтверждением
+- `/admin_cancel` — отменить админ-действие
+- `/admin_health` — диагностика конфига и базы
 
 ## Тарифы
 

@@ -162,6 +162,30 @@ def get_user(telegram_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_all_user_ids() -> list[int]:
+    """Return all registered Telegram user IDs."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT telegram_id FROM users ORDER BY created_at DESC").fetchall()
+    return [int(row["telegram_id"]) for row in rows]
+
+
+def get_users_page(limit: int = 20, offset: int = 0) -> list[dict]:
+    """Return a page of users for admin views."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                telegram_id, goal, age, height, weight, activity,
+                subscription_plan, premium_until, created_at
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def save_meal(
     telegram_id: int,
     dish_name: str,
@@ -211,6 +235,22 @@ def get_recent_meals(telegram_id: int, limit: int = 5) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_user_meals(telegram_id: int, limit: int = 10) -> list[dict]:
+    """Return recent meals for a user across all dates."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, dish_name, calories, protein, fat, carbs, created_at
+            FROM meals
+            WHERE telegram_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (telegram_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_today_stats(telegram_id: int) -> dict:
     """Return summed calories and macros for the current date."""
     with _connect() as conn:
@@ -255,6 +295,49 @@ def get_week_stats(telegram_id: int) -> list[dict]:
             (telegram_id, start_date.isoformat()),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_admin_stats() -> dict:
+    """Return aggregate product metrics for admins."""
+    today = date.today().isoformat()
+    with _connect() as conn:
+        users_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
+        meals_count = conn.execute("SELECT COUNT(*) AS count FROM meals").fetchone()["count"]
+        meals_today = conn.execute(
+            "SELECT COUNT(*) AS count FROM meals WHERE date = ?",
+            (today,),
+        ).fetchone()["count"]
+        active_today = conn.execute(
+            "SELECT COUNT(DISTINCT telegram_id) AS count FROM meals WHERE date = ?",
+            (today,),
+        ).fetchone()["count"]
+        premium_users = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM users
+            WHERE subscription_plan = 'premium'
+              AND (premium_until IS NULL OR premium_until >= ?)
+            """,
+            (today,),
+        ).fetchone()["count"]
+        payments = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS count,
+                COALESCE(SUM(amount), 0) AS amount
+            FROM subscriptions
+            """
+        ).fetchone()
+
+    return {
+        "users_count": int(users_count),
+        "meals_count": int(meals_count),
+        "meals_today": int(meals_today),
+        "active_today": int(active_today),
+        "premium_users": int(premium_users),
+        "payments_count": int(payments["count"]),
+        "payments_amount": int(payments["amount"]),
+    }
 
 
 def reset_today(telegram_id: int) -> None:
@@ -311,3 +394,18 @@ def save_subscription_payment(
                 _now(),
             ),
         )
+
+
+def get_recent_payments(limit: int = 10) -> list[dict]:
+    """Return recent subscription payments."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT telegram_id, plan, amount, currency, created_at
+            FROM subscriptions
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]

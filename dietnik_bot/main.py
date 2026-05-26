@@ -1042,19 +1042,45 @@ async def admin_broadcast_callback_handler(
     await callback.answer()
 
 
-@router.message(F.text.casefold().in_({"start", "старт"}))
+@router.message(F.text.casefold().in_({"start", "/start", "старт", "/старт"}))
 async def plain_start_handler(message: Message, state: FSMContext) -> None:
     """Help users who type start without the slash."""
     await start_handler(message, state)
 
 
-@router.message(F.text.casefold().in_({"my_id", "myid", "id", "admin_id"}))
+@router.message(
+    F.text.casefold().in_(
+        {
+            "my_id",
+            "/my_id",
+            "myid",
+            "/myid",
+            "id",
+            "/id",
+            "admin_id",
+            "/admin_id",
+        }
+    )
+)
 async def plain_my_id_handler(message: Message) -> None:
     """Help users who type ID commands without the slash."""
     await my_id_handler(message)
 
 
-@router.message(F.text.casefold().in_({"commands", "cmds", "cmnds", "команды"}))
+@router.message(
+    F.text.casefold().in_(
+        {
+            "commands",
+            "/commands",
+            "cmds",
+            "/cmds",
+            "cmnds",
+            "/cmnds",
+            "команды",
+            "/команды",
+        }
+    )
+)
 async def plain_commands_handler(message: Message) -> None:
     """Help users who type commands without the slash."""
     await commands_handler(message)
@@ -1147,6 +1173,14 @@ async def photo_handler(message: Message, bot: Bot) -> None:
 
 @router.message()
 async def fallback_handler(message: Message) -> None:
+    if message.text and message.text.startswith("/"):
+        await message.answer(
+            "Я пока не знаю такую команду.\n\n"
+            f"{_commands_text(_is_admin(message))}",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
     await message.answer(
         "Отправь фото еды или выбери действие в меню.",
         reply_markup=main_menu_keyboard(),

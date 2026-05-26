@@ -490,7 +490,7 @@ async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard())
 
 
-@router.message(Command("my_id"))
+@router.message(Command("my_id", "myid", "id", "admin_id"))
 async def my_id_handler(message: Message) -> None:
     await message.answer(
         f"Твой Telegram ID:\n<code>{message.from_user.id}</code>\n\n"
@@ -995,6 +995,12 @@ async def admin_broadcast_callback_handler(
 async def plain_start_handler(message: Message, state: FSMContext) -> None:
     """Help users who type start without the slash."""
     await start_handler(message, state)
+
+
+@router.message(F.text.casefold().in_({"my_id", "myid", "id", "admin_id"}))
+async def plain_my_id_handler(message: Message) -> None:
+    """Help users who type ID commands without the slash."""
+    await my_id_handler(message)
 
 
 @router.message(

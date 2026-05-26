@@ -353,6 +353,7 @@ def _normalize_command_text(text: str | None) -> str:
     command = text.casefold().strip()
     command = command.split(maxsplit=1)[0] if " " in command and not command.startswith("/ ") else command
     command = command.replace(" ", "")
+    command = command.split("@", 1)[0]
     return command.lstrip("/")
 
 
@@ -397,6 +398,16 @@ def _parse_float(text: str) -> float | None:
     except (AttributeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+@router.message(lambda message: _is_commands_request(message.text))
+async def commands_handler(message: Message) -> None:
+    """Send command list as a regular chat message."""
+    logger.info("Received commands request from user_id=%s text=%r", message.from_user.id, message.text)
+    await message.answer(
+        _commands_text(_is_admin(message)),
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 @router.message(Command("start"))
@@ -554,14 +565,6 @@ async def reset_day_handler(message: Message) -> None:
 @router.message(Command("help"))
 async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=main_menu_keyboard())
-
-
-@router.message(Command("commands", "command", "comands", "cmds", "cmnds", "команды"))
-async def commands_handler(message: Message) -> None:
-    await message.answer(
-        _commands_text(_is_admin(message)),
-        reply_markup=main_menu_keyboard(),
-    )
 
 
 @router.message(Command("my_id", "myid", "id", "admin_id"))
@@ -1088,12 +1091,6 @@ async def plain_start_handler(message: Message, state: FSMContext) -> None:
 async def plain_my_id_handler(message: Message) -> None:
     """Help users who type ID commands without the slash."""
     await my_id_handler(message)
-
-
-@router.message(lambda message: _is_commands_request(message.text))
-async def plain_commands_handler(message: Message) -> None:
-    """Send command list for slash, no-slash, and typo variants."""
-    await commands_handler(message)
 
 
 @router.message(

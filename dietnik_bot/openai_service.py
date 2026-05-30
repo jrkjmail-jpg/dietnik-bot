@@ -11,11 +11,13 @@ FOOD_ANALYSIS_PROMPT = """
 Ты AI-диетолог. Проанализируй фото еды.
 
 Задачи:
+- сначала определи, есть ли на фото еда или напиток;
 - определи блюдо;
 - рассчитай калории, белки, жиры и углеводы;
 - дай короткую рекомендацию по питанию на русском языке.
 
 Правила:
+- если еды или напитка на фото нет, верни is_food false, нули в КБЖУ и короткую рекомендацию сфотографировать еду крупнее и при хорошем свете;
 - НЕ используй слова "примерно", "около", "~";
 - НЕ пиши диапазоны;
 - верни только JSON без markdown;
@@ -23,6 +25,7 @@ FOOD_ANALYSIS_PROMPT = """
 
 Строгий формат ответа:
 {
+  "is_food": true,
   "dish": "название блюда",
   "calories": 500,
   "protein": 35,
@@ -72,7 +75,11 @@ def _parse_food_json(raw_text: str) -> Optional[dict]:
         return None
 
     try:
+        is_food = data.get("is_food", True)
+        if isinstance(is_food, str):
+            is_food = is_food.strip().casefold() in {"true", "да", "yes", "1"}
         return {
+            "is_food": bool(is_food),
             "dish": str(data["dish"]).strip(),
             "calories": int(data["calories"]),
             "protein": int(data["protein"]),

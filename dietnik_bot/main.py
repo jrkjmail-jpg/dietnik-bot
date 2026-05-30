@@ -1703,6 +1703,13 @@ async def photo_handler(message: Message, bot: Bot) -> None:
     if not result:
         await message.answer("Не получилось точно распознать блюдо. Попробуй отправить фото ещё раз.")
         return
+    if not result.get("is_food", True):
+        await message.answer(
+            "На фото не вижу еды.\n\n"
+            "Сфотографируй блюдо ближе, при хорошем свете и без лишних предметов в кадре.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
 
     save_meal(
         telegram_id=message.from_user.id,

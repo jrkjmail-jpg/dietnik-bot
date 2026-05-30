@@ -94,6 +94,14 @@ class FridgePanel(StatesGroup):
     photo = State()
 
 
+class ManualMeal(StatesGroup):
+    dish = State()
+    calories = State()
+    protein = State()
+    fat = State()
+    carbs = State()
+
+
 class AdminPanel(StatesGroup):
     broadcast_text = State()
     restore_db_file = State()
@@ -177,6 +185,7 @@ HELP_TEXT = """
 
 Основные кнопки:
 🍽 Добавить еду — отправь фото блюда
+✍️ Добавить вручную — введи КБЖУ сам
 📊 Дневник — прогресс за день
 💡 Рекомендации — что улучшить сегодня
 🤖 Диетолог — вопрос AI-диетологу
@@ -502,6 +511,7 @@ def _commands_text(is_admin: bool = False) -> str:
         "Основные:\n"
         "/start — пройти настройку заново\n"
         "/menu — главное меню\n"
+        "/manual_food — добавить еду вручную\n"
         "/today — прогресс за сегодня\n"
         "/profile — профиль и дневная норма\n"
         "/recommendations — рекомендации на сегодня\n"
@@ -643,6 +653,14 @@ def _parse_int(text: str) -> int | None:
     except (AttributeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def _parse_non_negative_int(text: str) -> int | None:
+    try:
+        value = int(text.strip())
+    except (AttributeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def _parse_float(text: str) -> float | None:
@@ -849,6 +867,107 @@ async def today_handler(message: Message) -> None:
 async def reset_day_handler(message: Message) -> None:
     reset_today(message.from_user.id)
     await message.answer("✅ Сегодняшние приёмы пищи удалены.", reply_markup=main_menu_keyboard())
+
+
+@router.message(Command("manual_food", "add_manual"))
+async def manual_food_handler(message: Message, state: FSMContext) -> None:
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала пройди настройку через /start.")
+        return
+
+    await state.set_state(ManualMeal.dish)
+    await message.answer(
+        "✍️ Добавим приём пищи вручную.\n\n"
+        "Напиши название блюда, например: гречка с курицей.\n"
+        "Отмена: /cancel",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(ManualMeal.dish)
+async def manual_meal_dish_handler(message: Message, state: FSMContext) -> None:
+    dish = (message.text or "").strip()
+    if len(dish) < 2:
+        await message.answer("Напиши название блюда, например: омлет с овощами.")
+        return
+
+    await state.update_data(dish=dish[:100])
+    await state.set_state(ManualMeal.calories)
+    await message.answer("Сколько калорий? Введи число, например: 450")
+
+
+@router.message(ManualMeal.calories)
+async def manual_meal_calories_handler(message: Message, state: FSMContext) -> None:
+    calories = _parse_int(message.text or "")
+    if not calories or calories > 5000:
+        await message.answer("Введи калории числом, например: 450")
+        return
+
+    await state.update_data(calories=calories)
+    await state.set_state(ManualMeal.protein)
+    await message.answer("Сколько белков в граммах? Например: 35")
+
+
+@router.message(ManualMeal.protein)
+async def manual_meal_protein_handler(message: Message, state: FSMContext) -> None:
+    protein = _parse_non_negative_int(message.text or "")
+    if protein is None or protein > 500:
+        await message.answer("Введи белки числом в граммах, например: 35")
+        return
+
+    await state.update_data(protein=protein)
+    await state.set_state(ManualMeal.fat)
+    await message.answer("Сколько жиров в граммах? Например: 18")
+
+
+@router.message(ManualMeal.fat)
+async def manual_meal_fat_handler(message: Message, state: FSMContext) -> None:
+    fat = _parse_non_negative_int(message.text or "")
+    if fat is None or fat > 500:
+        await message.answer("Введи жиры числом в граммах, например: 18")
+        return
+
+    await state.update_data(fat=fat)
+    await state.set_state(ManualMeal.carbs)
+    await message.answer("Сколько углеводов в граммах? Например: 55")
+
+
+@router.message(ManualMeal.carbs)
+async def manual_meal_carbs_handler(message: Message, state: FSMContext) -> None:
+    carbs = _parse_non_negative_int(message.text or "")
+    if carbs is None or carbs > 1000:
+        await message.answer("Введи углеводы числом в граммах, например: 55")
+        return
+
+    data = await state.get_data()
+    await state.clear()
+    recommendation = "Добавлено вручную. Для максимальной точности сверяй порцию с весами."
+    save_meal(
+        telegram_id=message.from_user.id,
+        dish_name=data["dish"],
+        calories=data["calories"],
+        protein=data["protein"],
+        fat=data["fat"],
+        carbs=carbs,
+        recommendation=recommendation,
+    )
+
+    user = get_user(message.from_user.id)
+    stats = get_today_stats(message.from_user.id)
+    progress = _format_progress(user, stats)
+    await message.answer(
+        "✅ Приём пищи добавлен вручную\n\n"
+        f"🍽 Блюдо: {_safe(data['dish'])}\n"
+        f"🔥 Калории: {data['calories']} ккал\n"
+        f"🥩 Белки: {data['protein']} г\n"
+        f"🥑 Жиры: {data['fat']} г\n"
+        f"🍚 Углеводы: {carbs} г\n"
+        f"💡 Рекомендация: {_safe(recommendation)}\n\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"{progress}",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 @router.message(Command("help"))
@@ -1593,6 +1712,7 @@ async def plain_my_id_handler(message: Message) -> None:
     F.text.in_(
         {
             "🍽 Добавить еду",
+            "✍️ Добавить вручную",
             "📊 Дневник",
             "💡 Рекомендации",
             "🤖 Диетолог",
@@ -1606,7 +1726,13 @@ async def plain_my_id_handler(message: Message) -> None:
 )
 async def menu_button_handler(message: Message, state: FSMContext) -> None:
     if message.text == "🍽 Добавить еду":
-        await message.answer("Пришли фото блюда, и я посчитаю КБЖУ.", reply_markup=main_menu_keyboard())
+        await message.answer(
+            "Пришли фото блюда, и я посчитаю КБЖУ.\n\n"
+            "Или нажми «✍️ Добавить вручную», если уже знаешь значения.",
+            reply_markup=main_menu_keyboard(),
+        )
+    elif message.text == "✍️ Добавить вручную":
+        await manual_food_handler(message, state)
     elif message.text == "📊 Дневник":
         await today_handler(message)
     elif message.text == "💡 Рекомендации":
@@ -1701,12 +1827,17 @@ async def photo_handler(message: Message, bot: Bot) -> None:
 
     result = await analyze_food_photo(file_url)
     if not result:
-        await message.answer("Не получилось точно распознать блюдо. Попробуй отправить фото ещё раз.")
+        await message.answer(
+            "Не получилось точно распознать блюдо.\n\n"
+            "Попробуй отправить фото ещё раз или нажми «✍️ Добавить вручную».",
+            reply_markup=main_menu_keyboard(),
+        )
         return
     if not result.get("is_food", True):
         await message.answer(
             "На фото не вижу еды.\n\n"
-            "Сфотографируй блюдо ближе, при хорошем свете и без лишних предметов в кадре.",
+            "Сфотографируй блюдо ближе, при хорошем свете и без лишних предметов в кадре.\n"
+            "Если КБЖУ уже известны, нажми «✍️ Добавить вручную».",
             reply_markup=main_menu_keyboard(),
         )
         return

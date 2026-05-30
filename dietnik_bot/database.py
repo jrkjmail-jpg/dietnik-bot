@@ -522,6 +522,66 @@ def get_recent_payments(limit: int = 10) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def add_fridge_item(
+    telegram_id: int,
+    name: str,
+    quantity: str = "",
+    expires_at: str = "",
+) -> int:
+    """Save a product in user's Premium fridge."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO fridge_items (telegram_id, name, quantity, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                telegram_id,
+                name.strip(),
+                quantity.strip(),
+                expires_at.strip(),
+                _now(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def get_fridge_items(telegram_id: int, limit: int = 50) -> list[dict]:
+    """Return user's saved fridge products."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, quantity, expires_at, created_at
+            FROM fridge_items
+            WHERE telegram_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (telegram_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_fridge_item(telegram_id: int, item_id: int) -> bool:
+    """Delete one fridge product owned by user."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM fridge_items WHERE telegram_id = ? AND id = ?",
+            (telegram_id, item_id),
+        )
+        return cursor.rowcount > 0
+
+
+def clear_fridge(telegram_id: int) -> int:
+    """Delete all fridge products for a user and return deleted count."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM fridge_items WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        return int(cursor.rowcount)
+
+
 def backup_database_file() -> Optional[Path]:
     """Create a timestamped backup copy of the current DB file."""
     db_path = Path(DB_PATH)

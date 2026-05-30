@@ -70,7 +70,7 @@ from keyboards import (
     subscription_keyboard,
 )
 from nutrition import calculate_norm, calculate_remaining
-from openai_service import analyze_food_photo, ask_dietitian
+from openai_service import analyze_food_photo, analyze_fridge_photo, ask_dietitian
 
 
 router = Router()
@@ -88,6 +88,10 @@ class Onboarding(StatesGroup):
 
 class Consultation(StatesGroup):
     question = State()
+
+
+class FridgePanel(StatesGroup):
+    photo = State()
 
 
 class AdminPanel(StatesGroup):
@@ -333,6 +337,7 @@ def _format_fridge(items: list[dict]) -> str:
         return (
             "🧊 Холодильник\n\n"
             "Пока пусто.\n\n"
+            "Быстрее всего: /fridge_photo и фото продуктов.\n\n"
             "Добавь продукт:\n"
             "/fridge_add Яйца; 6 шт; 2026-06-05\n\n"
             "Можно без даты: /fridge_add Творог; 400 г"
@@ -345,6 +350,7 @@ def _format_fridge(items: list[dict]) -> str:
         lines.append(f"{item['id']}. {_safe(item['name'])}{quantity}{expires}")
 
     lines.append("\nКоманды:")
+    lines.append("/fridge_photo — добавить продукты по фото")
     lines.append("/fridge_add название; количество; срок")
     lines.append("/fridge_delete id")
     lines.append("/fridge_clear")
@@ -505,6 +511,7 @@ def _commands_text(is_admin: bool = False) -> str:
         "Premium:\n"
         "/dietitian — AI-диетолог\n"
         "/fridge — холодильник\n"
+        "/fridge_photo — добавить продукты по фото\n"
         "/fridge_add название; количество; срок — добавить продукт\n"
         "/fridge_delete id — удалить продукт\n"
         "/fridge_clear — очистить холодильник\n"
@@ -950,6 +957,24 @@ async def fridge_add_handler(message: Message) -> None:
     item_id = add_fridge_item(message.from_user.id, name, quantity, expires_at)
     await message.answer(
         f"✅ Добавил в холодильник: {_safe(name)}\nID: {item_id}",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(Command("fridge_photo", "fridge_scan"))
+async def fridge_photo_handler(message: Message, state: FSMContext) -> None:
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала пройди настройку через /start.")
+        return
+    if not _is_premium(user):
+        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
+        return
+
+    await state.set_state(FridgePanel.photo)
+    await message.answer(
+        "🧊 Пришли фото продуктов, полки холодильника или чека.\n\n"
+        "Я распознаю продукты и добавлю их в холодильник. Отмена: /cancel",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -1598,6 +1623,63 @@ async def menu_button_handler(message: Message, state: FSMContext) -> None:
         await recipes_handler(message)
     elif message.text == "📈 Отчёты":
         await reports_handler(message)
+
+
+@router.message(FridgePanel.photo, F.photo)
+async def fridge_photo_scan_handler(message: Message, state: FSMContext, bot: Bot) -> None:
+    user = get_user(message.from_user.id)
+    if not user:
+        await state.clear()
+        await message.answer("Сначала пройди настройку через /start.")
+        return
+    if not _is_premium(user):
+        await state.clear()
+        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
+        return
+
+    await message.answer("🧊 Сканирую продукты для холодильника...")
+
+    try:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+    except Exception:
+        await message.answer("Не получилось получить фото. Попробуй отправить его ещё раз.")
+        return
+
+    items = await analyze_fridge_photo(file_url)
+    if not items:
+        await message.answer(
+            "Не получилось уверенно распознать продукты.\n\n"
+            "Попробуй фото ближе и светлее или добавь вручную: /fridge_add Название; количество",
+            parse_mode=None,
+        )
+        return
+
+    added_lines = []
+    for item in items:
+        item_id = add_fridge_item(
+            message.from_user.id,
+            item["name"],
+            item.get("quantity", ""),
+            item.get("expires_at", ""),
+        )
+        quantity = f" · {_safe(item.get('quantity'))}" if item.get("quantity") else ""
+        expires = f" · до {_safe(item.get('expires_at'))}" if item.get("expires_at") else ""
+        added_lines.append(f"{item_id}. {_safe(item['name'])}{quantity}{expires}")
+
+    await state.clear()
+    await message.answer(
+        "✅ Добавил продукты в холодильник\n\n"
+        + "\n".join(added_lines)
+        + "\n\n🍳 Теперь можно открыть /recipes.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(FridgePanel.photo)
+async def fridge_photo_waiting_handler(message: Message) -> None:
+    await message.answer("Пришли фото продуктов или отправь /cancel.")
 
 
 @router.message(F.photo)

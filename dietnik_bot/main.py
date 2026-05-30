@@ -185,7 +185,6 @@ HELP_TEXT = """
 
 Основные кнопки:
 🍽 Добавить еду — отправь фото блюда
-✍️ Добавить вручную — введи КБЖУ сам
 📊 Дневник — прогресс за день
 💡 Рекомендации — что улучшить сегодня
 🤖 Диетолог — вопрос AI-диетологу
@@ -883,6 +882,21 @@ async def manual_food_handler(message: Message, state: FSMContext) -> None:
         "Отмена: /cancel",
         reply_markup=main_menu_keyboard(),
     )
+
+
+@router.message(
+    F.text.casefold().in_(
+        {
+            "добавить вручную",
+            "вручную",
+            "ручной ввод",
+            "manual_food",
+            "add_manual",
+        }
+    )
+)
+async def plain_manual_food_handler(message: Message, state: FSMContext) -> None:
+    await manual_food_handler(message, state)
 
 
 @router.message(ManualMeal.dish)
@@ -1712,7 +1726,6 @@ async def plain_my_id_handler(message: Message) -> None:
     F.text.in_(
         {
             "🍽 Добавить еду",
-            "✍️ Добавить вручную",
             "📊 Дневник",
             "💡 Рекомендации",
             "🤖 Диетолог",
@@ -1728,11 +1741,9 @@ async def menu_button_handler(message: Message, state: FSMContext) -> None:
     if message.text == "🍽 Добавить еду":
         await message.answer(
             "Пришли фото блюда, и я посчитаю КБЖУ.\n\n"
-            "Или нажми «✍️ Добавить вручную», если уже знаешь значения.",
+            "Если уже знаешь КБЖУ, напиши «добавить вручную» или /manual_food.",
             reply_markup=main_menu_keyboard(),
         )
-    elif message.text == "✍️ Добавить вручную":
-        await manual_food_handler(message, state)
     elif message.text == "📊 Дневник":
         await today_handler(message)
     elif message.text == "💡 Рекомендации":
@@ -1829,7 +1840,7 @@ async def photo_handler(message: Message, bot: Bot) -> None:
     if not result:
         await message.answer(
             "Не получилось точно распознать блюдо.\n\n"
-            "Попробуй отправить фото ещё раз или нажми «✍️ Добавить вручную».",
+            "Попробуй отправить фото ещё раз или напиши «добавить вручную».",
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -1837,7 +1848,7 @@ async def photo_handler(message: Message, bot: Bot) -> None:
         await message.answer(
             "На фото не вижу еды.\n\n"
             "Сфотографируй блюдо ближе, при хорошем свете и без лишних предметов в кадре.\n"
-            "Если КБЖУ уже известны, нажми «✍️ Добавить вручную».",
+            "Если КБЖУ уже известны, напиши «добавить вручную».",
             reply_markup=main_menu_keyboard(),
         )
         return

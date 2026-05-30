@@ -310,7 +310,7 @@ def _format_dashboard(user: dict, stats: dict, first_name: str | None = None) ->
 def _format_subscription(user: dict | None) -> str:
     current_plan = _subscription_name(user) if user else "не выбран"
     premium_until = user.get("premium_until") if user else None
-    premium_line = f"\nPremium активен до: {premium_until}" if premium_until else ""
+    premium_line = f"\nPremium активен до: {premium_until}" if user and _is_premium(user) and premium_until else ""
     return (
         "💳 Подписка Dietnik\n\n"
         f"Текущий тариф: {current_plan}{premium_line}\n\n"
@@ -318,7 +318,7 @@ def _format_subscription(user: dict | None) -> str:
         "Дневник · фото-учёт · AI-анализ еды · дневная цель · рекомендации\n\n"
         f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽/мес\n"
         "Всё из Basic · AI-диетолог · холодильник · рецепты под остаток КБЖУ · "
-        "отчёты · прогресс тела\n\n"
+        "отчёты\n\n"
         "Premium делает бота персональным ассистентом, а не просто счётчиком калорий."
     )
 

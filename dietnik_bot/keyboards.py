@@ -49,8 +49,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🍽 Добавить еду"), KeyboardButton(text="📊 Дневник")],
             [KeyboardButton(text="💡 Рекомендации"), KeyboardButton(text="🤖 Диетолог")],
             [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="💳 Подписка")],
-            [KeyboardButton(text="🧊 Холодильник"), KeyboardButton(text="🍳 Рецепты")],
-            [KeyboardButton(text="📈 Отчёты")],
+            [KeyboardButton(text="🍳 Рецепты"), KeyboardButton(text="📈 Отчёты")],
         ],
         resize_keyboard=True,
     )

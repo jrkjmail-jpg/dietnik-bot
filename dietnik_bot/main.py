@@ -36,14 +36,10 @@ from config import (
     validate_config,
 )
 from database import (
-    add_fridge_item,
-    clear_fridge,
-    delete_fridge_item,
     get_admin_stats,
     get_all_user_ids,
     get_app_state,
     get_db_status,
-    get_fridge_items,
     get_recent_payments,
     get_recent_meals,
     get_storage_probe_status,
@@ -70,7 +66,7 @@ from keyboards import (
     subscription_keyboard,
 )
 from nutrition import calculate_norm, calculate_remaining
-from openai_service import analyze_food_photo, analyze_fridge_photo, ask_dietitian
+from openai_service import analyze_food_photo, ask_dietitian
 
 
 router = Router()
@@ -88,10 +84,6 @@ class Onboarding(StatesGroup):
 
 class Consultation(StatesGroup):
     question = State()
-
-
-class FridgePanel(StatesGroup):
-    photo = State()
 
 
 class ManualMeal(StatesGroup):
@@ -119,8 +111,10 @@ RECIPE_LIBRARY = [
         "fat": 14,
         "carbs": 52,
         "ingredients": ["курица", "гречка", "огурец", "помидор", "зелень"],
+        "steps": "Отвари гречку, обжарь или запеки курицу без лишнего масла, добавь салат из овощей.",
         "note": "Хороший вариант, когда нужно добрать белок без тяжёлого ужина.",
         "goals": {"Похудение", "Поддержание"},
+        "tags": {"protein", "dinner"},
     },
     {
         "title": "Омлет с творогом и овощами",
@@ -129,8 +123,10 @@ RECIPE_LIBRARY = [
         "fat": 18,
         "carbs": 14,
         "ingredients": ["яйца", "творог", "помидор", "шпинат", "сыр"],
+        "steps": "Смешай яйца с творогом, добавь овощи и готовь на сковороде под крышкой.",
         "note": "Плотный белковый приём пищи, удобно на завтрак или поздний ужин.",
         "goals": {"Похудение", "Поддержание"},
+        "tags": {"protein", "breakfast", "light"},
     },
     {
         "title": "Рис с тунцом и овощами",
@@ -139,8 +135,10 @@ RECIPE_LIBRARY = [
         "fat": 16,
         "carbs": 74,
         "ingredients": ["рис", "тунец", "огурец", "кукуруза", "йогурт"],
+        "steps": "Смешай готовый рис с тунцом и овощами, заправь йогуртом или лимонным соком.",
         "note": "Баланс белка и углеводов после активного дня или тренировки.",
         "goals": {"Поддержание", "Набор массы"},
+        "tags": {"protein", "carbs", "dinner"},
     },
     {
         "title": "Творог с ягодами и орехами",
@@ -149,8 +147,10 @@ RECIPE_LIBRARY = [
         "fat": 11,
         "carbs": 24,
         "ingredients": ["творог", "ягоды", "орехи", "йогурт"],
+        "steps": "Смешай творог с йогуртом, добавь ягоды и немного орехов сверху.",
         "note": "Лёгкий способ добрать белок, когда калорий осталось немного.",
         "goals": {"Похудение", "Поддержание"},
+        "tags": {"protein", "light", "breakfast"},
     },
     {
         "title": "Паста с индейкой",
@@ -159,8 +159,34 @@ RECIPE_LIBRARY = [
         "fat": 20,
         "carbs": 86,
         "ingredients": ["паста", "индейка", "томат", "сыр", "зелень"],
+        "steps": "Отвари пасту, приготовь индейку в томатном соусе и добавь немного сыра.",
         "note": "Сытный вариант для набора массы или дня с высоким расходом энергии.",
         "goals": {"Набор массы", "Поддержание"},
+        "tags": {"carbs", "dinner"},
+    },
+    {
+        "title": "Рыба с картофелем и зелёным салатом",
+        "calories": 480,
+        "protein": 38,
+        "fat": 15,
+        "carbs": 46,
+        "ingredients": ["рыба", "картофель", "листовой салат", "огурец", "лимон"],
+        "steps": "Запеки рыбу и картофель, собери салат и добавь лимонный сок.",
+        "note": "Спокойный ужин с белком и умеренными углеводами.",
+        "goals": {"Похудение", "Поддержание"},
+        "tags": {"protein", "dinner", "light"},
+    },
+    {
+        "title": "Овсянка с протеином и бананом",
+        "calories": 430,
+        "protein": 30,
+        "fat": 10,
+        "carbs": 58,
+        "ingredients": ["овсянка", "протеин", "банан", "молоко", "корица"],
+        "steps": "Приготовь овсянку, вмешай протеин после нагрева и добавь банан.",
+        "note": "Удобный завтрак, если нужно добрать углеводы без тяжёлой еды.",
+        "goals": {"Поддержание", "Набор массы"},
+        "tags": {"breakfast", "carbs", "protein"},
     },
 ]
 
@@ -256,9 +282,17 @@ def _format_progress(user: dict, stats: dict) -> str:
     return (
         "📊 Твой прогресс за сегодня:\n\n"
         f"🔥 Калории: {stats['calories']} / {user['norm_calories']} ккал\n"
+        f"{_progress_bar(stats['calories'], user['norm_calories'])} "
+        f"{_percent(stats['calories'], user['norm_calories'])}%\n\n"
         f"🥩 Белки: {stats['protein']} / {user['norm_protein']} г\n"
+        f"{_progress_bar(stats['protein'], user['norm_protein'])} "
+        f"{_percent(stats['protein'], user['norm_protein'])}%\n\n"
         f"🥑 Жиры: {stats['fat']} / {user['norm_fat']} г\n"
-        f"🍚 Углеводы: {stats['carbs']} / {user['norm_carbs']} г\n\n"
+        f"{_progress_bar(stats['fat'], user['norm_fat'])} "
+        f"{_percent(stats['fat'], user['norm_fat'])}%\n\n"
+        f"🍚 Углеводы: {stats['carbs']} / {user['norm_carbs']} г\n"
+        f"{_progress_bar(stats['carbs'], user['norm_carbs'])} "
+        f"{_percent(stats['carbs'], user['norm_carbs'])}%\n\n"
         "━━━━━━━━━━━━━━\n\n"
         "🎯 Осталось до цели:\n\n"
         f"🔥 Калории: {remaining['calories']} ккал\n"
@@ -317,8 +351,7 @@ def _format_subscription(user: dict | None) -> str:
         f"🌱 Basic — {BASIC_PRICE_RUB} ₽/мес\n"
         "Дневник · фото-учёт · AI-анализ еды · дневная цель · рекомендации\n\n"
         f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽/мес\n"
-        "Всё из Basic · AI-диетолог · холодильник · рецепты под остаток КБЖУ · "
-        "отчёты\n\n"
+        "Всё из Basic · AI-диетолог · рецепты под остаток КБЖУ · недельные отчёты\n\n"
         "Premium делает бота персональным ассистентом, а не просто счётчиком калорий."
     )
 
@@ -340,47 +373,6 @@ def _format_recommendations(user: dict, stats: dict) -> str:
     return "💡 Рекомендации на сегодня\n\n" + "\n".join(f"• {tip}" for tip in tips)
 
 
-def _format_fridge(items: list[dict]) -> str:
-    if not items:
-        return (
-            "🧊 Холодильник\n\n"
-            "Пока пусто.\n\n"
-            "Быстрее всего: /fridge_photo и фото продуктов.\n\n"
-            "Добавь продукт:\n"
-            "/fridge_add Яйца; 6 шт; 2026-06-05\n\n"
-            "Можно без даты: /fridge_add Творог; 400 г"
-        )
-
-    lines = ["🧊 Холодильник\n"]
-    for item in items:
-        quantity = f" · {_safe(item['quantity'])}" if item.get("quantity") else ""
-        expires = f" · до {_safe(item['expires_at'])}" if item.get("expires_at") else ""
-        lines.append(f"{item['id']}. {_safe(item['name'])}{quantity}{expires}")
-
-    lines.append("\nКоманды:")
-    lines.append("/fridge_photo — добавить продукты по фото")
-    lines.append("/fridge_add название; количество; срок")
-    lines.append("/fridge_delete id")
-    lines.append("/fridge_clear")
-    lines.append("/recipes — рецепты из холодильника")
-    return "\n".join(lines)
-
-
-def _parse_fridge_item(text: str) -> tuple[str, str, str] | None:
-    raw = _command_args_text(text, "fridge_add").strip()
-    if not raw:
-        return None
-
-    separator = ";" if ";" in raw else "|"
-    parts = [part.strip() for part in raw.split(separator)] if separator in raw else [raw]
-    name = parts[0] if parts else ""
-    quantity = parts[1] if len(parts) > 1 else ""
-    expires_at = parts[2] if len(parts) > 2 else ""
-    if len(name) < 2:
-        return None
-    return name[:80], quantity[:60], expires_at[:30]
-
-
 def _command_args_text(text: str | None, command_name: str) -> str:
     if not text:
         return ""
@@ -391,54 +383,80 @@ def _command_args_text(text: str | None, command_name: str) -> str:
     return ""
 
 
-def _recipe_score(recipe: dict, remaining: dict, fridge_items: list[dict], goal: str) -> tuple[int, list[str]]:
-    fridge_words = " ".join(str(item["name"]).casefold() for item in fridge_items)
-    matched = [
-        ingredient
-        for ingredient in recipe["ingredients"]
-        if ingredient.casefold() in fridge_words
-    ]
-
+def _recipe_score(recipe: dict, remaining: dict, goal: str, mode: str = "") -> int:
     calories_left = max(remaining["calories"], 1)
-    calorie_score = max(0, 35 - round(abs(recipe["calories"] - calories_left) / calories_left * 35))
+    calorie_score = max(0, 38 - round(abs(recipe["calories"] - calories_left) / calories_left * 38))
 
     protein_left = max(remaining["protein"], 0)
     if protein_left:
-        protein_score = min(25, round(recipe["protein"] / protein_left * 25))
+        protein_score = max(0, 24 - round(abs(recipe["protein"] - protein_left) / max(protein_left, 1) * 24))
     else:
-        protein_score = 10 if recipe["protein"] <= 35 else 4
+        protein_score = 12 if recipe["protein"] <= 30 else 4
 
-    fridge_score = round(len(matched) / len(recipe["ingredients"]) * 30)
+    fat_left = max(remaining["fat"], 0)
+    fat_score = 14 if recipe["fat"] <= fat_left or fat_left == 0 else max(0, 14 - round((recipe["fat"] - fat_left) / max(fat_left, 1) * 14))
+
+    carbs_left = max(remaining["carbs"], 0)
+    carbs_score = 14 if recipe["carbs"] <= carbs_left or carbs_left == 0 else max(0, 14 - round((recipe["carbs"] - carbs_left) / max(carbs_left, 1) * 14))
+
     goal_score = 10 if goal in recipe["goals"] else 0
-    return min(100, calorie_score + protein_score + fridge_score + goal_score), matched
+    mode_score = 8 if mode and mode in recipe.get("tags", set()) else 0
+    return min(100, calorie_score + protein_score + fat_score + carbs_score + goal_score + mode_score)
 
 
-def _format_recipe_suggestions(user: dict, remaining: dict, fridge_items: list[dict]) -> str:
+def _recipe_mode_from_args(args: str) -> str:
+    aliases = {
+        "белок": "protein",
+        "protein": "protein",
+        "легко": "light",
+        "light": "light",
+        "ужин": "dinner",
+        "dinner": "dinner",
+        "завтрак": "breakfast",
+        "breakfast": "breakfast",
+        "углеводы": "carbs",
+        "carbs": "carbs",
+    }
+    return aliases.get(args.casefold().strip(), "")
+
+
+def _recipe_mode_label(mode: str) -> str:
+    labels = {
+        "protein": "больше белка",
+        "light": "лёгкое блюдо",
+        "dinner": "ужин",
+        "breakfast": "завтрак",
+        "carbs": "углеводы",
+    }
+    return labels.get(mode, mode)
+
+
+def _format_recipe_suggestions(user: dict, remaining: dict, mode: str = "") -> str:
     scored = []
     for recipe in RECIPE_LIBRARY:
-        score, matched = _recipe_score(recipe, remaining, fridge_items, user["goal"])
-        scored.append((score, matched, recipe))
+        score = _recipe_score(recipe, remaining, user["goal"], mode)
+        scored.append((score, recipe))
     scored.sort(key=lambda item: item[0], reverse=True)
 
     lines = [
         "🍳 Рецепты под остаток КБЖУ\n",
+        "Источник: внутренняя база Dietnik. Подбор идёт по твоему дневному остатку и цели.\n",
         f"Осталось: 🔥 {remaining['calories']} ккал · 🥩 {remaining['protein']} г · "
         f"🥑 {remaining['fat']} г · 🍚 {remaining['carbs']} г\n",
     ]
 
-    if not fridge_items:
-        lines.append("Холодильник пустой, поэтому подбираю по цели и остатку. Добавь продукты через /fridge_add.")
-    else:
-        lines.append("Учитываю продукты из холодильника.")
+    if mode:
+        lines.append(f"Фильтр: {_recipe_mode_label(mode)}.")
+    lines.append("Можно выбрать: /recipes белок, /recipes легко, /recipes ужин, /recipes завтрак.")
 
-    for score, matched, recipe in scored[:3]:
-        matched_text = ", ".join(matched) if matched else "совпадений пока нет"
+    for score, recipe in scored[:3]:
         lines.append(
             "\n"
             f"{score}% · <b>{_safe(recipe['title'])}</b>\n"
             f"🔥 {recipe['calories']} ккал · 🥩 {recipe['protein']} г · "
             f"🥑 {recipe['fat']} г · 🍚 {recipe['carbs']} г\n"
-            f"Из холодильника: {_safe(matched_text)}\n"
+            f"Состав: {_safe(', '.join(recipe['ingredients']))}\n"
+            f"Как приготовить: {_safe(recipe['steps'])}\n"
             f"{_safe(recipe['note'])}"
         )
 
@@ -448,7 +466,7 @@ def _format_recipe_suggestions(user: dict, remaining: dict, fridge_items: list[d
 def _premium_required_text() -> str:
     return (
         "🌿 Эта функция входит в Premium.\n\n"
-        "Premium открывает холодильник, рецепты под остаток КБЖУ, отчёты и расширенного AI-диетолога.\n"
+        "Premium открывает рецепты под остаток КБЖУ, отчёты и расширенного AI-диетолога.\n"
         "Открой раздел «💳 Подписка», чтобы посмотреть тарифы."
     )
 
@@ -519,11 +537,6 @@ def _commands_text(is_admin: bool = False) -> str:
         "/commands — список команд\n\n"
         "Premium:\n"
         "/dietitian — AI-диетолог\n"
-        "/fridge — холодильник\n"
-        "/fridge_photo — добавить продукты по фото\n"
-        "/fridge_add название; количество; срок — добавить продукт\n"
-        "/fridge_delete id — удалить продукт\n"
-        "/fridge_clear — очистить холодильник\n"
         "/recipes — рецепты под остаток КБЖУ\n"
         "/reports — недельные отчёты\n\n"
         "Сервисные:\n"
@@ -1054,99 +1067,6 @@ async def reports_handler(message: Message) -> None:
     )
 
 
-@router.message(Command("fridge"))
-async def fridge_handler(message: Message) -> None:
-    user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
-        return
-    if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
-        return
-    await message.answer(_format_fridge(get_fridge_items(message.from_user.id)), reply_markup=main_menu_keyboard())
-
-
-@router.message(Command("fridge_add"))
-async def fridge_add_handler(message: Message) -> None:
-    user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
-        return
-    if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
-        return
-
-    parsed = _parse_fridge_item(message.text or "")
-    if not parsed:
-        await message.answer(
-            "Формат добавления:\n"
-            "/fridge_add Яйца; 6 шт; 2026-06-05\n\n"
-            "Дата необязательна.",
-            parse_mode=None,
-        )
-        return
-
-    name, quantity, expires_at = parsed
-    item_id = add_fridge_item(message.from_user.id, name, quantity, expires_at)
-    await message.answer(
-        f"✅ Добавил в холодильник: {_safe(name)}\nID: {item_id}",
-        reply_markup=main_menu_keyboard(),
-    )
-
-
-@router.message(Command("fridge_photo", "fridge_scan"))
-async def fridge_photo_handler(message: Message, state: FSMContext) -> None:
-    user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
-        return
-    if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
-        return
-
-    await state.set_state(FridgePanel.photo)
-    await message.answer(
-        "🧊 Пришли фото продуктов, полки холодильника или чека.\n\n"
-        "Я распознаю продукты и добавлю их в холодильник. Отмена: /cancel",
-        reply_markup=main_menu_keyboard(),
-    )
-
-
-@router.message(Command("fridge_delete"))
-async def fridge_delete_handler(message: Message) -> None:
-    user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
-        return
-    if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
-        return
-
-    item_id = _parse_user_id(_command_args(message))
-    if not item_id:
-        await message.answer("Формат: /fridge_delete id", parse_mode=None)
-        return
-
-    if delete_fridge_item(message.from_user.id, item_id):
-        await message.answer("✅ Продукт удалён.", reply_markup=main_menu_keyboard())
-    else:
-        await message.answer("Не нашёл продукт с таким ID.", reply_markup=main_menu_keyboard())
-
-
-@router.message(Command("fridge_clear"))
-async def fridge_clear_handler(message: Message) -> None:
-    user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
-        return
-    if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
-        return
-
-    deleted = clear_fridge(message.from_user.id)
-    await message.answer(f"✅ Холодильник очищен. Удалено продуктов: {deleted}.", reply_markup=main_menu_keyboard())
-
-
 @router.message(Command("recipes"))
 async def recipes_handler(message: Message) -> None:
     user = get_user(message.from_user.id)
@@ -1159,8 +1079,9 @@ async def recipes_handler(message: Message) -> None:
 
     stats = get_today_stats(message.from_user.id)
     remaining = calculate_remaining(user, stats)
+    mode = _recipe_mode_from_args(_command_args(message))
     await message.answer(
-        _format_recipe_suggestions(user, remaining, get_fridge_items(message.from_user.id)),
+        _format_recipe_suggestions(user, remaining, mode),
         reply_markup=main_menu_keyboard(),
     )
 
@@ -1731,7 +1652,6 @@ async def plain_my_id_handler(message: Message) -> None:
             "🤖 Диетолог",
             "👤 Профиль",
             "💳 Подписка",
-            "🧊 Холодильник",
             "🍳 Рецепты",
             "📈 Отчёты",
         }
@@ -1754,69 +1674,10 @@ async def menu_button_handler(message: Message, state: FSMContext) -> None:
         await profile_handler(message)
     elif message.text == "💳 Подписка":
         await subscription_handler(message)
-    elif message.text == "🧊 Холодильник":
-        await fridge_handler(message)
     elif message.text == "🍳 Рецепты":
         await recipes_handler(message)
     elif message.text == "📈 Отчёты":
         await reports_handler(message)
-
-
-@router.message(FridgePanel.photo, F.photo)
-async def fridge_photo_scan_handler(message: Message, state: FSMContext, bot: Bot) -> None:
-    user = get_user(message.from_user.id)
-    if not user:
-        await state.clear()
-        await message.answer("Сначала пройди настройку через /start.")
-        return
-    if not _is_premium(user):
-        await state.clear()
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
-        return
-
-    await message.answer("🧊 Сканирую продукты для холодильника...")
-
-    try:
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-    except Exception:
-        await message.answer("Не получилось получить фото. Попробуй отправить его ещё раз.")
-        return
-
-    items = await analyze_fridge_photo(file_url)
-    if not items:
-        await message.answer(
-            "Не получилось уверенно распознать продукты.\n\n"
-            "Попробуй фото ближе и светлее или добавь вручную: /fridge_add Название; количество",
-            parse_mode=None,
-        )
-        return
-
-    added_lines = []
-    for item in items:
-        item_id = add_fridge_item(
-            message.from_user.id,
-            item["name"],
-            item.get("quantity", ""),
-            item.get("expires_at", ""),
-        )
-        quantity = f" · {_safe(item.get('quantity'))}" if item.get("quantity") else ""
-        expires = f" · до {_safe(item.get('expires_at'))}" if item.get("expires_at") else ""
-        added_lines.append(f"{item_id}. {_safe(item['name'])}{quantity}{expires}")
-
-    await state.clear()
-    await message.answer(
-        "✅ Добавил продукты в холодильник\n\n"
-        + "\n".join(added_lines)
-        + "\n\n🍳 Теперь можно открыть /recipes.",
-        reply_markup=main_menu_keyboard(),
-    )
-
-
-@router.message(FridgePanel.photo)
-async def fridge_photo_waiting_handler(message: Message) -> None:
-    await message.answer("Пришли фото продуктов или отправь /cancel.")
 
 
 @router.message(F.photo)

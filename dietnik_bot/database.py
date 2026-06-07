@@ -107,6 +107,31 @@ def init_db() -> None:
             )
             """
         )
+        _ensure_column(conn, "subscriptions", "invoice_payload", "TEXT")
+        _ensure_column(conn, "subscriptions", "subscription_expires_at", "TEXT")
+        _ensure_column(conn, "subscriptions", "is_recurring", "INTEGER DEFAULT 0")
+        conn.execute(
+            """
+            DELETE FROM subscriptions
+            WHERE telegram_payment_charge_id IS NOT NULL
+              AND telegram_payment_charge_id != ''
+              AND id NOT IN (
+                  SELECT MIN(id)
+                  FROM subscriptions
+                  WHERE telegram_payment_charge_id IS NOT NULL
+                    AND telegram_payment_charge_id != ''
+                  GROUP BY telegram_payment_charge_id
+              )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_telegram_charge
+            ON subscriptions(telegram_payment_charge_id)
+            WHERE telegram_payment_charge_id IS NOT NULL
+              AND telegram_payment_charge_id != ''
+            """
+        )
 
 def _ensure_column(
     conn: sqlite3.Connection,
@@ -321,24 +346,31 @@ def get_today_stats(telegram_id: int) -> dict:
     }
 
 
-def get_week_stats(telegram_id: int) -> list[dict]:
-    """Return daily nutrition totals for the last seven days."""
-    start_date = date.today() - timedelta(days=6)
+def get_period_stats(telegram_id: int, days: int | None = 7) -> list[dict]:
+    """Return daily nutrition totals for a recent period or all recorded time."""
+    params: list[object] = [telegram_id]
+    date_filter = ""
+    if days is not None:
+        start_date = date.today() - timedelta(days=max(1, days) - 1)
+        date_filter = "AND date >= ?"
+        params.append(start_date.isoformat())
+
     with _connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 date,
+                COUNT(*) AS meals_count,
                 COALESCE(SUM(calories), 0) AS calories,
                 COALESCE(SUM(protein), 0) AS protein,
                 COALESCE(SUM(fat), 0) AS fat,
                 COALESCE(SUM(carbs), 0) AS carbs
             FROM meals
-            WHERE telegram_id = ? AND date >= ?
+            WHERE telegram_id = ? {date_filter}
             GROUP BY date
             ORDER BY date
             """,
-            (telegram_id, start_date.isoformat()),
+            params,
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -374,6 +406,14 @@ def get_admin_stats() -> dict:
             FROM subscriptions
             """
         ).fetchone()
+        payment_totals = conn.execute(
+            """
+            SELECT currency, COALESCE(SUM(amount), 0) AS amount
+            FROM subscriptions
+            GROUP BY currency
+            ORDER BY currency
+            """
+        ).fetchall()
 
     return {
         "users_count": int(users_count),
@@ -383,6 +423,9 @@ def get_admin_stats() -> dict:
         "premium_users": int(premium_users),
         "payments_count": int(payments["count"]),
         "payments_amount": int(payments["amount"]),
+        "payment_totals": {
+            str(row["currency"]): int(row["amount"]) for row in payment_totals
+        },
     }
 
 
@@ -405,6 +448,7 @@ def get_db_status() -> dict:
         "users_count": stats["users_count"],
         "payments_count": stats["payments_count"],
         "payments_amount": stats["payments_amount"],
+        "payment_totals": stats["payment_totals"],
         "premium_users": stats["premium_users"],
         "in_app_data": str(db_resolved).startswith("/app/data"),
         "in_data_dir": in_data_dir,
@@ -464,34 +508,50 @@ def set_subscription(
         )
 
 
-def save_subscription_payment(
+def activate_premium_payment(
     telegram_id: int,
-    plan: str,
     amount: int,
     currency: str,
     provider_payment_charge_id: str,
     telegram_payment_charge_id: str,
-) -> None:
-    """Store successful Telegram payment details."""
+    invoice_payload: str,
+    premium_until: str,
+    is_recurring: bool = False,
+) -> bool:
+    """Atomically store a new payment and activate Premium."""
     with _connect() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
-            INSERT INTO subscriptions (
+            INSERT OR IGNORE INTO subscriptions (
                 telegram_id, plan, amount, currency,
-                provider_payment_charge_id, telegram_payment_charge_id, created_at
+                provider_payment_charge_id, telegram_payment_charge_id,
+                invoice_payload, subscription_expires_at, is_recurring, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 'premium', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 telegram_id,
-                plan,
                 amount,
                 currency,
                 provider_payment_charge_id,
                 telegram_payment_charge_id,
+                invoice_payload,
+                premium_until,
+                int(is_recurring),
                 _now(),
             ),
         )
+        if cursor.rowcount != 1:
+            return False
+        conn.execute(
+            """
+            UPDATE users
+            SET subscription_plan = 'premium', premium_until = ?, updated_at = ?
+            WHERE telegram_id = ?
+            """,
+            (premium_until, _now(), telegram_id),
+        )
+    return True
 
 
 def get_recent_payments(limit: int = 10) -> list[dict]:
@@ -499,7 +559,10 @@ def get_recent_payments(limit: int = 10) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT telegram_id, plan, amount, currency, created_at
+            SELECT
+                telegram_id, plan, amount, currency,
+                telegram_payment_charge_id, subscription_expires_at,
+                is_recurring, created_at
             FROM subscriptions
             ORDER BY created_at DESC
             LIMIT ?

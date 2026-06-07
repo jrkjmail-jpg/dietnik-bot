@@ -16,8 +16,9 @@ Dietnik — Telegram-бот диетолог. Пользователь отпр�
 - Рекомендации на день
 - AI-диетолог для Premium
 - Рецепты с процентом совпадения по цели и дневному остатку КБЖУ
-- Тарифы Basic и Premium
-- Заготовка Telegram Payments через `PAYMENT_PROVIDER_TOKEN`
+- Отчёты за 7 дней, 30 дней и весь период
+- Бесплатный Basic и платный Premium
+- Оплата Premium через Telegram Stars с защитой от повторной обработки платежа
 
 ## Установка Python на Mac
 
@@ -73,8 +74,8 @@ cp .env.example .env
 ```env
 BOT_TOKEN=твой_telegram_bot_token
 OPENAI_API_KEY=твой_openai_api_key
-PAYMENT_PROVIDER_TOKEN=токен_платежного_провайдера_если_подключаешь_оплату
 SUPPORT_USERNAME=@твой_аккаунт_поддержки
+PREMIUM_PRICE_XTR=450
 ADMIN_IDS=твой_telegram_id
 DATA_DIR=/app/data
 DB_PATH=/app/data/bot.db
@@ -122,7 +123,7 @@ python3 main.py
   - `DATA_DIR=/app/data`
   - `DB_PATH=/app/data/bot.db`
   - `PERSISTENCE_PATH=/app/data/bot_state.pkl`
-- Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN`, когда подключишь Telegram Payments
+- Для оплаты: укажи стоимость Premium в `PREMIUM_PRICE_XTR`
 - Для админки: добавь `ADMIN_IDS`, например `123456789` или несколько ID через запятую
 - Для автобэкапа: `AUTO_DB_BACKUP_INTERVAL_HOURS=6`
 
@@ -160,8 +161,12 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 - `/recommendations` — рекомендации на сегодня
 - `/dietitian` — AI-диетолог для Premium
 - `/subscription` — тарифы и оплата
+- `/terms` — условия Premium
+- `/paysupport` — помощь с оплатой
 - `/recipes` — рецепты под остаток КБЖУ для Premium
-- `/reports` — недельные отчёты для Premium
+- `/reports` — отчёт за 7 дней для Premium
+- `/reports 30` — отчёт за 30 дней
+- `/reports all` — отчёт за весь период
 - `/help` — показать инструкцию
 
 Рецепты берутся из внутренней базы Dietnik и подбираются под остаток за день. Можно выбрать фокус:
@@ -204,7 +209,7 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 
 ## Тарифы
 
-### Basic — 490 ₽/мес
+### Basic — бесплатно
 
 - Дневник питания
 - Фото-учёт еды
@@ -212,14 +217,24 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 - Дневная цель
 - Короткие рекомендации
 
-### Premium — 890 ₽/мес
+### Premium — 450 Telegram Stars / 30 дней
 
 - Всё из Basic
 - AI-диетолог в формате вопрос-ответ
 - Рецепты под остаток КБЖУ
-- Отчёты
+- Отчёты за 7 дней, 30 дней и весь период
 
-Пока `PAYMENT_PROVIDER_TOKEN` не задан, бот показывает тарифы, но не выставляет счёт.
+Стоимость меняется переменной `PREMIUM_PRICE_XTR`. Оплата проходит внутри Telegram,
+доступ выдаётся автоматически на 30 дней. Повторная доставка одного и того же
+платёжного события не продлевает подписку второй раз.
+
+### Почему не YooKassa
+
+Premium является цифровой услугой внутри Telegram. По правилам Telegram такие
+покупки должны оплачиваться только Telegram Stars (`XTR`). YooKassa и другие
+внешние провайдеры подходят для физических товаров и услуг, но не для продажи
+доступа к функциям бота внутри Telegram. Поэтому токен YooKassa для Premium не
+нужен.
 
 ## Важно
 
@@ -244,7 +259,7 @@ dietnik_bot/
 
 ## Планы
 
-### А) Рецепты
+### Рецепты
 
 - Добавлено: рецепты подбираются под дневной остаток КБЖУ
 - Добавлено: у рецепта есть процент совпадения с целью
@@ -254,7 +269,6 @@ dietnik_bot/
 
 ### Другие идеи
 
-- Статистика за неделю
+- Графики изменения веса
 - История приёмов пищи
-- Платная подписка
 - Персональные рекомендации

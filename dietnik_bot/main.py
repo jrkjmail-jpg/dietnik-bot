@@ -30,12 +30,13 @@ from config import (
     DATA_DIR,
     DB_PATH,
     OPENAI_API_KEY,
-    PAYMENT_PROVIDER_TOKEN,
     PERSISTENCE_PATH,
+    PREMIUM_PRICE_XTR,
     SUPPORT_USERNAME,
     validate_config,
 )
 from database import (
+    activate_premium_payment,
     get_admin_stats,
     get_all_user_ids,
     get_app_state,
@@ -47,12 +48,11 @@ from database import (
     get_user,
     get_user_meals,
     get_users_page,
-    get_week_stats,
+    get_period_stats,
     init_db,
     reset_today,
     restore_database_file,
     set_app_state,
-    save_subscription_payment,
     save_meal,
     save_user,
     set_subscription,
@@ -63,6 +63,7 @@ from keyboards import (
     goal_keyboard,
     main_menu_keyboard,
     remove_keyboard,
+    reports_keyboard,
     subscription_keyboard,
 )
 from nutrition import calculate_norm, calculate_remaining
@@ -99,9 +100,8 @@ class AdminPanel(StatesGroup):
     restore_db_file = State()
 
 
-BASIC_PRICE_RUB = 490
-PREMIUM_PRICE_RUB = 890
 MONTH_DAYS = 30
+PREMIUM_INVOICE_PAYLOAD = "dietnik_premium_30"
 
 RECIPE_LIBRARY = [
     {
@@ -266,6 +266,16 @@ def _percent(value: int, target: int) -> int:
     return min(999, round(value / target * 100))
 
 
+def _format_payment_totals(totals: dict[str, int]) -> str:
+    parts = []
+    for currency, amount in totals.items():
+        if currency == "RUB":
+            parts.append(f"{amount / 100:.2f} RUB")
+        else:
+            parts.append(f"{amount} {currency}")
+    return ", ".join(parts) or "0"
+
+
 def _days_from_created_at(user: dict) -> int:
     created_at = user.get("created_at")
     if not created_at:
@@ -348,11 +358,66 @@ def _format_subscription(user: dict | None) -> str:
     return (
         "💳 Подписка Dietnik\n\n"
         f"Текущий тариф: {current_plan}{premium_line}\n\n"
-        f"🌱 Basic — {BASIC_PRICE_RUB} ₽/мес\n"
+        "🌱 Basic — бесплатно\n"
         "Дневник · фото-учёт · AI-анализ еды · дневная цель · рекомендации\n\n"
-        f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽/мес\n"
-        "Всё из Basic · AI-диетолог · рецепты под остаток КБЖУ · недельные отчёты\n\n"
+        f"🌿 Premium — {PREMIUM_PRICE_XTR} Telegram Stars / 30 дней\n"
+        "Всё из Basic · AI-диетолог · рецепты под остаток КБЖУ · "
+        "отчёты за 7, 30 дней и весь период\n\n"
         "Premium делает бота персональным ассистентом, а не просто счётчиком калорий."
+    )
+
+
+def _format_report(
+    user: dict,
+    rows: list[dict],
+    label: str,
+    expected_days: int | None = None,
+) -> str:
+    if not rows:
+        return f"📈 Отчёт: {label}\n\nЗа этот период пока нет записей."
+
+    recorded_days = len(rows)
+    meals_count = sum(int(day["meals_count"]) for day in rows)
+    first_day = date.fromisoformat(rows[0]["date"])
+    last_day = date.fromisoformat(rows[-1]["date"])
+    calendar_days = expected_days or max(1, (last_day - first_day).days + 1)
+    avg_calories = round(sum(day["calories"] for day in rows) / recorded_days)
+    avg_protein = round(sum(day["protein"] for day in rows) / recorded_days)
+    avg_fat = round(sum(day["fat"] for day in rows) / recorded_days)
+    avg_carbs = round(sum(day["carbs"] for day in rows) / recorded_days)
+
+    calorie_target_days = sum(
+        user["norm_calories"] * 0.85 <= day["calories"] <= user["norm_calories"] * 1.15
+        for day in rows
+    )
+    protein_target_days = sum(
+        day["protein"] >= user["norm_protein"] * 0.9 for day in rows
+    )
+    logging_rate = round(recorded_days / calendar_days * 100)
+
+    if avg_calories > user["norm_calories"] * 1.15:
+        conclusion = "Средняя калорийность выше цели. Проверь размер порций и калорийные добавки."
+    elif avg_calories < user["norm_calories"] * 0.75:
+        conclusion = "Средняя калорийность заметно ниже цели. Не урезай рацион слишком резко."
+    elif avg_protein < user["norm_protein"] * 0.9:
+        conclusion = "Калории близки к цели, но стоит добавить белок в основные приёмы пищи."
+    else:
+        conclusion = "Рацион в целом близок к цели. Сохраняй регулярность записей."
+
+    return (
+        f"📈 Отчёт: {label}\n"
+        f"Период записей: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}\n\n"
+        f"🍽 Приёмов пищи: {meals_count}\n"
+        f"🗓 Дней с записями: {recorded_days}\n"
+        f"✍️ Регулярность дневника: {logging_rate}%\n\n"
+        "Среднее за день с записями:\n"
+        f"🔥 {avg_calories} / {user['norm_calories']} ккал\n"
+        f"🥩 {avg_protein} / {user['norm_protein']} г\n"
+        f"🥑 {avg_fat} / {user['norm_fat']} г\n"
+        f"🍚 {avg_carbs} / {user['norm_carbs']} г\n\n"
+        f"🎯 Калории в коридоре цели: {calorie_target_days} из {recorded_days} дней\n"
+        f"💪 Белок не ниже 90% цели: {protein_target_days} из {recorded_days} дней\n\n"
+        f"Вывод: {conclusion}"
     )
 
 
@@ -533,12 +598,16 @@ def _commands_text(is_admin: bool = False) -> str:
         "/profile — профиль и дневная норма\n"
         "/recommendations — рекомендации на сегодня\n"
         "/subscription — тарифы и подписка\n"
+        "/terms — условия Premium\n"
+        "/paysupport — помощь с оплатой\n"
         "/help — как пользоваться\n"
         "/commands — список команд\n\n"
         "Premium:\n"
         "/dietitian — AI-диетолог\n"
         "/recipes — рецепты под остаток КБЖУ\n"
-        "/reports — недельные отчёты\n\n"
+        "/reports — отчёт за 7 дней\n"
+        "/reports 30 — отчёт за 30 дней\n"
+        "/reports all — отчёт за весь период\n\n"
         "Сервисные:\n"
         "/cancel — отменить текущий режим\n"
         "/reset_day — очистить сегодняшний дневник\n"
@@ -1023,7 +1092,31 @@ async def subscription_handler(message: Message) -> None:
         return
     await message.answer(
         _format_subscription(user),
-        reply_markup=subscription_keyboard(bool(PAYMENT_PROVIDER_TOKEN)),
+        reply_markup=subscription_keyboard(PREMIUM_PRICE_XTR),
+    )
+
+
+@router.message(Command("terms"))
+async def terms_handler(message: Message) -> None:
+    await message.answer(
+        "📄 Условия Premium\n\n"
+        f"Стоимость: {PREMIUM_PRICE_XTR} Telegram Stars за 30 дней.\n"
+        "Premium открывает AI-диетолога, рецепты и расширенные отчёты.\n"
+        "После оплаты доступ активируется автоматически.\n\n"
+        "Dietnik помогает вести дневник питания, но не заменяет врача. "
+        "Расчёты по фото являются оценкой и зависят от размера порции.\n\n"
+        f"Вопросы по оплате: /paysupport или {SUPPORT_USERNAME}",
+        parse_mode=None,
+    )
+
+
+@router.message(Command("paysupport"))
+async def payment_support_handler(message: Message) -> None:
+    await message.answer(
+        "🛟 Поддержка по оплате\n\n"
+        f"Напиши {SUPPORT_USERNAME} и укажи свой Telegram ID: {message.from_user.id}.\n"
+        "Также приложи дату платежа и скриншот квитанции Telegram Stars.",
+        parse_mode=None,
     )
 
 
@@ -1040,9 +1133,13 @@ async def recommendations_handler(message: Message) -> None:
     )
 
 
-@router.message(Command("reports"))
-async def reports_handler(message: Message) -> None:
-    user = get_user(message.from_user.id)
+async def _send_report(
+    message: Message,
+    period: str,
+    telegram_id: int | None = None,
+) -> None:
+    user_id = telegram_id or message.from_user.id
+    user = get_user(user_id)
     if not user:
         await message.answer("Сначала пройди настройку через /start.")
         return
@@ -1050,21 +1147,41 @@ async def reports_handler(message: Message) -> None:
         await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
         return
 
-    week_stats = get_week_stats(message.from_user.id)
-    if not week_stats:
-        await message.answer("📈 За неделю пока нет записей.", reply_markup=main_menu_keyboard())
-        return
-
-    avg_calories = round(sum(day["calories"] for day in week_stats) / len(week_stats))
-    avg_protein = round(sum(day["protein"] for day in week_stats) / len(week_stats))
+    periods = {
+        "7": (7, "последние 7 дней"),
+        "30": (30, "последние 30 дней"),
+        "all": (None, "весь период"),
+    }
+    days, label = periods.get(period, periods["7"])
+    rows = get_period_stats(user_id, days)
     await message.answer(
-        "📈 Отчёт за неделю\n\n"
-        f"Средние калории: {avg_calories} ккал/день\n"
-        f"Средний белок: {avg_protein} г/день\n"
-        f"Дней с записями: {len(week_stats)} из 7\n\n"
-        "Следующий шаг: удерживать дневник минимум 5 дней подряд.",
-        reply_markup=main_menu_keyboard(),
+        _format_report(user, rows, label, expected_days=days),
+        reply_markup=reports_keyboard(),
     )
+
+
+@router.message(Command("reports"))
+async def reports_handler(message: Message) -> None:
+    arg = _command_args(message).casefold()
+    aliases = {
+        "неделя": "7",
+        "week": "7",
+        "7": "7",
+        "месяц": "30",
+        "month": "30",
+        "30": "30",
+        "все": "all",
+        "весь": "all",
+        "all": "all",
+    }
+    await _send_report(message, aliases.get(arg, "7"))
+
+
+@router.callback_query(F.data.in_({"report_7", "report_30", "report_all"}))
+async def report_period_callback(callback: CallbackQuery) -> None:
+    period = callback.data.removeprefix("report_")
+    await _send_report(callback.message, period, callback.from_user.id)
+    await callback.answer()
 
 
 @router.message(Command("recipes"))
@@ -1117,59 +1234,116 @@ async def dietitian_question_handler(message: Message, state: FSMContext) -> Non
     await message.answer(f"🤖 Диетолог\n\n{answer}", reply_markup=main_menu_keyboard(), parse_mode=None)
 
 
-@router.callback_query(F.data.in_({"buy_basic", "buy_premium"}))
+@router.callback_query(F.data == "payment_terms")
+async def payment_terms_callback(callback: CallbackQuery) -> None:
+    await terms_handler(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "payment_support")
+async def payment_support_callback(callback: CallbackQuery) -> None:
+    await callback.message.answer(
+        f"🛟 Поддержка по оплате: {SUPPORT_USERNAME}\n"
+        f"Твой Telegram ID: {callback.from_user.id}",
+        parse_mode=None,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "buy_premium")
 async def buy_subscription_handler(callback: CallbackQuery, bot: Bot) -> None:
-    plan = "premium" if callback.data == "buy_premium" else "basic"
-    amount_rub = PREMIUM_PRICE_RUB if plan == "premium" else BASIC_PRICE_RUB
-    title = "Dietnik Premium на 30 дней" if plan == "premium" else "Dietnik Basic на 30 дней"
-
-    if not PAYMENT_PROVIDER_TOKEN:
-        await callback.message.answer(
-            "Оплата ещё не подключена на сервере.\n\n"
-            f"Добавь PAYMENT_PROVIDER_TOKEN в Bothost или напиши в поддержку: {SUPPORT_USERNAME}",
-            reply_markup=main_menu_keyboard(),
-        )
-        await callback.answer()
-        return
-
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
-        title=title,
-        description="Подписка открывает функции Dietnik на 30 дней.",
-        payload=f"dietnik_{plan}_30",
-        provider_token=PAYMENT_PROVIDER_TOKEN,
-        currency="RUB",
-        prices=[LabeledPrice(label=title, amount=amount_rub * 100)],
-        start_parameter=f"dietnik-{plan}",
+        title="Dietnik Premium на 30 дней",
+        description="AI-диетолог, рецепты под остаток КБЖУ и расширенные отчёты.",
+        payload=PREMIUM_INVOICE_PAYLOAD,
+        provider_token="",
+        currency="XTR",
+        prices=[
+            LabeledPrice(
+                label="Dietnik Premium на 30 дней",
+                amount=PREMIUM_PRICE_XTR,
+            )
+        ],
     )
     await callback.answer()
 
 
 @router.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
-    await pre_checkout_query.answer(ok=True)
+    valid = (
+        pre_checkout_query.invoice_payload == PREMIUM_INVOICE_PAYLOAD
+        and pre_checkout_query.currency == "XTR"
+        and pre_checkout_query.total_amount == PREMIUM_PRICE_XTR
+    )
+    if valid:
+        await pre_checkout_query.answer(ok=True)
+        return
+    await pre_checkout_query.answer(
+        ok=False,
+        error_message="Счёт устарел или содержит неверную сумму. Открой раздел «Подписка» ещё раз.",
+    )
 
 
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message, bot: Bot) -> None:
     payment = message.successful_payment
-    plan = "premium" if "premium" in payment.invoice_payload else "basic"
-    premium_until = None
-    if plan == "premium":
-        premium_until = (datetime.now() + timedelta(days=MONTH_DAYS)).date().isoformat()
+    if (
+        payment.invoice_payload != PREMIUM_INVOICE_PAYLOAD
+        or payment.currency != "XTR"
+        or payment.total_amount != PREMIUM_PRICE_XTR
+    ):
+        logger.error(
+            "Rejected unexpected successful payment user_id=%s payload=%r currency=%s amount=%s",
+            message.from_user.id,
+            payment.invoice_payload,
+            payment.currency,
+            payment.total_amount,
+        )
+        await message.answer(
+            f"Платёж получен, но его параметры не совпали с тарифом. Напиши /paysupport. "
+            f"ID операции: {payment.telegram_payment_charge_id}",
+            parse_mode=None,
+        )
+        return
 
-    set_subscription(message.from_user.id, plan, premium_until)
-    save_subscription_payment(
+    user = get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала пройди настройку через /start, затем напиши /paysupport.")
+        return
+
+    start_date = date.today()
+    current_until = user.get("premium_until")
+    if current_until:
+        try:
+            parsed_until = date.fromisoformat(current_until)
+            if parsed_until > start_date:
+                start_date = parsed_until
+        except ValueError:
+            pass
+    premium_until = (start_date + timedelta(days=MONTH_DAYS)).isoformat()
+
+    inserted = activate_premium_payment(
         telegram_id=message.from_user.id,
-        plan=plan,
         amount=payment.total_amount,
         currency=payment.currency,
-        provider_payment_charge_id=payment.provider_payment_charge_id,
+        provider_payment_charge_id=payment.provider_payment_charge_id or "",
         telegram_payment_charge_id=payment.telegram_payment_charge_id,
+        invoice_payload=payment.invoice_payload,
+        premium_until=premium_until,
+        is_recurring=bool(getattr(payment, "is_recurring", False)),
     )
+    if not inserted:
+        await message.answer(
+            "✅ Этот платёж уже обработан. Premium остаётся активным.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
     await message.answer(
         "✅ Оплата прошла успешно!\n\n"
-        f"Тариф {_subscription_name(get_user(message.from_user.id) or {})} активирован.",
+        f"Premium активирован до {premium_until}.\n"
+        "Спасибо, что поддерживаешь Dietnik.",
         reply_markup=main_menu_keyboard(),
     )
     await _maybe_auto_backup_db(bot, "successful_payment")
@@ -1194,7 +1368,7 @@ async def admin_health_handler(message: Message) -> None:
         "🩺 Диагностика\n\n"
         f"ADMIN_IDS настроены: {'да' if ADMIN_IDS else 'нет'}\n"
         f"OpenAI ключ: {'есть' if OPENAI_API_KEY else 'нет'}\n"
-        f"Оплата: {'подключена' if PAYMENT_PROVIDER_TOKEN else 'не подключена'}\n"
+        f"Оплата: Telegram Stars, {PREMIUM_PRICE_XTR} XTR\n"
         f"DATA_DIR: {DATA_DIR}\n"
         f"DB_PATH: {DB_PATH}\n"
         f"PERSISTENCE_PATH: {PERSISTENCE_PATH}\n"
@@ -1211,7 +1385,7 @@ async def dbstatus_handler(message: Message) -> None:
 
     status = get_db_status()
     size_kb = round(status["db_size"] / 1024, 2)
-    payments_rub = status["payments_amount"] // 100
+    payment_totals = _format_payment_totals(status["payment_totals"])
     await message.answer(
         "🗄 Статус базы\n\n"
         f"Путь базы: {status['db_path']}\n"
@@ -1219,7 +1393,7 @@ async def dbstatus_handler(message: Message) -> None:
         f"Размер: {status['db_size']} байт ({size_kb} KB)\n"
         f"Пользователей: {status['users_count']}\n"
         f"Платежей/заказов: {status['payments_count']}\n"
-        f"Общая сумма покупок: {payments_rub} ₽\n"
+        f"Куплено единиц по валютам: {payment_totals}\n"
         f"Premium пользователей: {status['premium_users']}\n"
         f"База лежит в /app/data: {'да' if status['in_app_data'] else 'нет'}\n"
         f"База лежит в DATA_DIR: {'да' if status['in_data_dir'] else 'нет'}\n"
@@ -1293,7 +1467,7 @@ async def admin_stats_handler(message: Message) -> None:
         return
 
     stats = get_admin_stats()
-    payments_rub = stats["payments_amount"] // 100
+    payment_totals = _format_payment_totals(stats["payment_totals"])
     await message.answer(
         "📊 Статистика Dietnik\n\n"
         f"Пользователи: {stats['users_count']}\n"
@@ -1302,7 +1476,7 @@ async def admin_stats_handler(message: Message) -> None:
         f"Приёмов пищи сегодня: {stats['meals_today']}\n"
         f"Приёмов пищи всего: {stats['meals_count']}\n"
         f"Платежей: {stats['payments_count']}\n"
-        f"Выручка: {payments_rub} ₽"
+        f"Оплаты: {payment_totals}"
     )
 
 
@@ -1448,10 +1622,15 @@ async def admin_payments_handler(message: Message) -> None:
 
     lines = ["💳 Последние платежи\n"]
     for payment in payments:
-        amount_rub = int(payment["amount"]) // 100
+        amount = (
+            int(payment["amount"]) // 100
+            if payment["currency"] == "RUB"
+            else int(payment["amount"])
+        )
         lines.append(
             f"<code>{payment['telegram_id']}</code> · {payment['plan']} · "
-            f"{amount_rub} {payment['currency']} · {payment['created_at']}"
+            f"{amount} {payment['currency']} · {payment['created_at']}\n"
+            f"<code>{payment['telegram_payment_charge_id'] or '-'}</code>"
         )
     await message.answer("\n".join(lines))
 

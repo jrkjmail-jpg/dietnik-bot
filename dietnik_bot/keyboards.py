@@ -55,17 +55,33 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def subscription_keyboard(payments_enabled: bool) -> InlineKeyboardMarkup:
-    if payments_enabled:
-        keyboard = [
-            [InlineKeyboardButton(text="🌱 Купить Basic — 490 ₽/мес", callback_data="buy_basic")],
-            [InlineKeyboardButton(text="🌿 Купить Premium — 890 ₽/мес", callback_data="buy_premium")],
+def subscription_keyboard(premium_price_xtr: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"⭐ Купить Premium — {premium_price_xtr} Stars",
+                    callback_data="buy_premium",
+                )
+            ],
+            [
+                InlineKeyboardButton(text="Условия", callback_data="payment_terms"),
+                InlineKeyboardButton(text="Поддержка", callback_data="payment_support"),
+            ],
         ]
-    else:
-        keyboard = [
-            [InlineKeyboardButton(text="Написать по оплате", url="https://t.me/bothostru")],
+    )
+
+
+def reports_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="7 дней", callback_data="report_7"),
+                InlineKeyboardButton(text="30 дней", callback_data="report_30"),
+                InlineKeyboardButton(text="Весь период", callback_data="report_all"),
+            ]
         ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
 
 
 def remove_keyboard() -> ReplyKeyboardRemove:

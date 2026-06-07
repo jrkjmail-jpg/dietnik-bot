@@ -56,29 +56,71 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 def subscription_keyboard(
+    basic_price_rub: int,
     premium_price_rub: int,
     payments_enabled: bool,
+    current_plan: str = "trial",
 ) -> InlineKeyboardMarkup:
-    payment_button = (
-        InlineKeyboardButton(
-            text=f"💳 Купить Premium — {premium_price_rub} ₽",
-            callback_data="buy_premium",
+    if payments_enabled:
+        payment_buttons = []
+        if current_plan != "premium":
+            payment_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"🌱 Basic — {basic_price_rub} ₽",
+                        callback_data="buy_basic",
+                    )
+                ]
+            )
+        payment_buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🌿 Premium — {premium_price_rub} ₽",
+                    callback_data="buy_premium",
+                )
+            ]
         )
-        if payments_enabled
-        else InlineKeyboardButton(
-            text="Оплата настраивается",
-            callback_data="payment_unavailable",
-        )
-    )
+    else:
+        payment_buttons = [
+            [
+                InlineKeyboardButton(
+                    text="Оплата настраивается",
+                    callback_data="payment_unavailable",
+                )
+            ]
+        ]
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [payment_button],
+            *payment_buttons,
             [
                 InlineKeyboardButton(text="Условия", callback_data="payment_terms"),
                 InlineKeyboardButton(text="Поддержка", callback_data="payment_support"),
             ],
         ]
     )
+
+
+def trial_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if trial_available:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📸 Попробовать бесплатно",
+                    callback_data="start_food_trial",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="💳 Выбрать подписку",
+                callback_data="show_subscriptions",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def reports_keyboard() -> InlineKeyboardMarkup:

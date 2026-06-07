@@ -17,8 +17,9 @@ Dietnik — Telegram-бот диетолог. Пользователь отпр�
 - AI-диетолог для Premium
 - Рецепты с процентом совпадения по цели и дневному остатку КБЖУ
 - Отчёты за 7 дней, 30 дней и весь период
-- Бесплатный Basic и платный Premium
-- Оплата Premium через ЮKassa с защитой от повторной обработки платежа
+- Одноразовый бесплатный анализ фото для новых пользователей
+- Платные тарифы Basic и Premium
+- Оплата Basic и Premium через ЮKassa с защитой от повторной обработки платежа
 
 ## Установка Python на Mac
 
@@ -76,6 +77,7 @@ BOT_TOKEN=твой_telegram_bot_token
 OPENAI_API_KEY=твой_openai_api_key
 PAYMENT_PROVIDER_TOKEN=платёжный_токен_ЮKassa_из_BotFather
 SUPPORT_USERNAME=@твой_аккаунт_поддержки
+BASIC_PRICE_RUB=490
 PREMIUM_PRICE_RUB=890
 ADMIN_IDS=твой_telegram_id
 DATA_DIR=/app/data
@@ -124,7 +126,7 @@ python3 main.py
   - `DATA_DIR=/app/data`
   - `DB_PATH=/app/data/bot.db`
   - `PERSISTENCE_PATH=/app/data/bot_state.pkl`
-- Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN` и стоимость в `PREMIUM_PRICE_RUB`
+- Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN`, `BASIC_PRICE_RUB` и `PREMIUM_PRICE_RUB`
 - Для админки: добавь `ADMIN_IDS`, например `123456789` или несколько ID через запятую
 - Для автобэкапа: `AUTO_DB_BACKUP_INTERVAL_HOURS=6`
 
@@ -162,7 +164,7 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 - `/recommendations` — рекомендации на сегодня
 - `/dietitian` — AI-диетолог для Premium
 - `/subscription` — тарифы и оплата
-- `/terms` — условия Premium
+- `/terms` — условия подписки
 - `/paysupport` — помощь с оплатой
 - `/recipes` — рецепты под остаток КБЖУ для Premium
 - `/reports` — отчёт за 7 дней для Premium
@@ -195,8 +197,9 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 - `/admin_stats` — статистика проекта
 - `/admin_users [страница]` — список пользователей
 - `/admin_user <telegram_id>` — карточка пользователя
+- `/admin_grant_basic <telegram_id> [дней]` — выдать Basic
 - `/admin_grant_premium <telegram_id> [дней]` — выдать Premium
-- `/admin_revoke_premium <telegram_id>` — снять Premium
+- `/admin_revoke_premium <telegram_id>` — отключить платный доступ
 - `/admin_reset_day <telegram_id>` — очистить дневник пользователя за сегодня
 - `/admin_payments [кол-во]` — последние платежи
 - `/admin_message <telegram_id> <текст>` — написать пользователю от имени бота
@@ -210,7 +213,24 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 
 ## Тарифы
 
-### Basic — бесплатно
+### Сценарий нового пользователя
+
+1. Пользователь проходит анкету.
+2. Бот показывает кнопку «Попробовать бесплатно».
+3. Пользователь отправляет одно фото и получает название блюда и калорийность.
+4. Пробный результат не сохраняется в дневник.
+5. Бот предлагает Basic и Premium.
+6. До оплаты дневник, повторный анализ, рекомендации и Premium-функции закрыты.
+
+### Пробный режим — бесплатно
+
+- Доступен после анкеты
+- Один анализ фотографии
+- Показывает название блюда и калорийность
+- Не сохраняет еду в дневник
+- Привязан к Telegram ID и не выдаётся повторно
+
+### Basic — 490 ₽ / 30 дней
 
 - Дневник питания
 - Фото-учёт еды
@@ -225,7 +245,8 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 - Рецепты под остаток КБЖУ
 - Отчёты за 7 дней, 30 дней и весь период
 
-Стоимость меняется переменной `PREMIUM_PRICE_RUB`. Оплата проходит через платёжную
+Стоимость меняется переменными `BASIC_PRICE_RUB` и `PREMIUM_PRICE_RUB`.
+Оплата проходит через платёжную
 форму ЮKassa внутри Telegram, доступ выдаётся автоматически на 30 дней. Повторная
 доставка одного и того же платёжного события не продлевает подписку второй раз.
 
@@ -240,6 +261,7 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 
 ```env
 PAYMENT_PROVIDER_TOKEN=токен_из_BotFather
+BASIC_PRICE_RUB=490
 PREMIUM_PRICE_RUB=890
 ```
 

@@ -75,7 +75,26 @@ def init_db() -> None:
         )
         _ensure_column(conn, "users", "subscription_plan", "TEXT DEFAULT 'basic'")
         _ensure_column(conn, "users", "premium_until", "TEXT")
+        _ensure_column(conn, "users", "subscription_until", "TEXT")
+        _ensure_column(conn, "users", "trial_used", "INTEGER DEFAULT 0")
         _ensure_column(conn, "users", "updated_at", "TEXT")
+        conn.execute(
+            """
+            UPDATE users
+            SET subscription_until = premium_until
+            WHERE subscription_plan = 'premium'
+              AND subscription_until IS NULL
+              AND premium_until IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            UPDATE users
+            SET trial_used = 1
+            WHERE subscription_plan IN ('basic', 'premium')
+              AND COALESCE(trial_used, 0) = 0
+            """
+        )
 
         conn.execute(
             """
@@ -190,9 +209,10 @@ def save_user(
             """
             INSERT INTO users (
                 telegram_id, gender, age, height, weight, activity, goal,
-                norm_calories, norm_protein, norm_fat, norm_carbs, created_at
+                norm_calories, norm_protein, norm_fat, norm_carbs,
+                subscription_plan, trial_used, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'trial', 0, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 gender = excluded.gender,
                 age = excluded.age,
@@ -233,6 +253,20 @@ def get_user(telegram_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def mark_trial_used(telegram_id: int) -> bool:
+    """Consume the one free photo analysis once for a Telegram user."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE users
+            SET trial_used = 1, updated_at = ?
+            WHERE telegram_id = ? AND COALESCE(trial_used, 0) = 0
+            """,
+            (_now(), telegram_id),
+        )
+    return cursor.rowcount == 1
+
+
 def get_all_user_ids() -> list[int]:
     """Return all registered Telegram user IDs."""
     with _connect() as conn:
@@ -247,7 +281,8 @@ def get_users_page(limit: int = 20, offset: int = 0) -> list[dict]:
             """
             SELECT
                 telegram_id, goal, age, height, weight, activity,
-                subscription_plan, premium_until, created_at
+                subscription_plan, subscription_until, premium_until,
+                trial_used, created_at
             FROM users
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -394,9 +429,24 @@ def get_admin_stats() -> dict:
             SELECT COUNT(*) AS count
             FROM users
             WHERE subscription_plan = 'premium'
-              AND (premium_until IS NULL OR premium_until >= ?)
+              AND (
+                  COALESCE(subscription_until, premium_until) IS NULL
+                  OR COALESCE(subscription_until, premium_until) >= ?
+              )
             """,
             (today,),
+        ).fetchone()["count"]
+        basic_users = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM users
+            WHERE subscription_plan = 'basic'
+              AND (subscription_until IS NULL OR subscription_until >= ?)
+            """,
+            (today,),
+        ).fetchone()["count"]
+        trial_users = conn.execute(
+            "SELECT COUNT(*) AS count FROM users WHERE subscription_plan = 'trial'"
         ).fetchone()["count"]
         payments = conn.execute(
             """
@@ -421,6 +471,8 @@ def get_admin_stats() -> dict:
         "meals_today": int(meals_today),
         "active_today": int(active_today),
         "premium_users": int(premium_users),
+        "basic_users": int(basic_users),
+        "trial_users": int(trial_users),
         "payments_count": int(payments["count"]),
         "payments_amount": int(payments["amount"]),
         "payment_totals": {
@@ -450,6 +502,8 @@ def get_db_status() -> dict:
         "payments_amount": stats["payments_amount"],
         "payment_totals": stats["payment_totals"],
         "premium_users": stats["premium_users"],
+        "basic_users": stats["basic_users"],
+        "trial_users": stats["trial_users"],
         "in_app_data": str(db_resolved).startswith("/app/data"),
         "in_data_dir": in_data_dir,
         "db_path_explicit": DB_PATH_EXPLICIT,
@@ -494,31 +548,39 @@ def reset_today(telegram_id: int) -> None:
 def set_subscription(
     telegram_id: int,
     plan: str,
-    premium_until: str | None = None,
+    subscription_until: str | None = None,
 ) -> None:
     """Update user's subscription plan."""
+    premium_until = subscription_until if plan == "premium" else None
     with _connect() as conn:
         conn.execute(
             """
             UPDATE users
-            SET subscription_plan = ?, premium_until = ?, updated_at = ?
+            SET subscription_plan = ?, subscription_until = ?,
+                premium_until = ?,
+                trial_used = CASE WHEN ? IN ('basic', 'premium') THEN 1 ELSE trial_used END,
+                updated_at = ?
             WHERE telegram_id = ?
             """,
-            (plan, premium_until, _now(), telegram_id),
+            (plan, subscription_until, premium_until, plan, _now(), telegram_id),
         )
 
 
-def activate_premium_payment(
+def activate_subscription_payment(
     telegram_id: int,
+    plan: str,
     amount: int,
     currency: str,
     provider_payment_charge_id: str,
     telegram_payment_charge_id: str,
     invoice_payload: str,
-    premium_until: str,
+    subscription_until: str,
     is_recurring: bool = False,
 ) -> bool:
-    """Atomically store a new payment and activate Premium."""
+    """Atomically store a new payment and activate the selected plan."""
+    if plan not in {"basic", "premium"}:
+        raise ValueError("Unsupported subscription plan")
+    premium_until = subscription_until if plan == "premium" else None
     with _connect() as conn:
         cursor = conn.execute(
             """
@@ -527,16 +589,17 @@ def activate_premium_payment(
                 provider_payment_charge_id, telegram_payment_charge_id,
                 invoice_payload, subscription_expires_at, is_recurring, created_at
             )
-            VALUES (?, 'premium', ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 telegram_id,
+                plan,
                 amount,
                 currency,
                 provider_payment_charge_id,
                 telegram_payment_charge_id,
                 invoice_payload,
-                premium_until,
+                subscription_until,
                 int(is_recurring),
                 _now(),
             ),
@@ -546,10 +609,11 @@ def activate_premium_payment(
         conn.execute(
             """
             UPDATE users
-            SET subscription_plan = 'premium', premium_until = ?, updated_at = ?
+            SET subscription_plan = ?, subscription_until = ?,
+                premium_until = ?, trial_used = 1, updated_at = ?
             WHERE telegram_id = ?
             """,
-            (premium_until, _now(), telegram_id),
+            (plan, subscription_until, premium_until, _now(), telegram_id),
         )
     return True
 

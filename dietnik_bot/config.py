@@ -31,6 +31,7 @@ def _get_int_env(name: str, default: int) -> int:
 
 
 AUTO_DB_BACKUP_INTERVAL_HOURS = _get_int_env("AUTO_DB_BACKUP_INTERVAL_HOURS", 6)
+BASIC_PRICE_RUB = max(1, _get_int_env("BASIC_PRICE_RUB", 490))
 PREMIUM_PRICE_RUB = max(1, _get_int_env("PREMIUM_PRICE_RUB", 890))
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = {

@@ -26,6 +26,7 @@ from aiogram.types import (
 from config import (
     ADMIN_IDS,
     AUTO_DB_BACKUP_INTERVAL_HOURS,
+    BASIC_PRICE_RUB,
     BOT_TOKEN,
     DATA_DIR,
     DB_PATH,
@@ -37,7 +38,7 @@ from config import (
     validate_config,
 )
 from database import (
-    activate_premium_payment,
+    activate_subscription_payment,
     get_admin_stats,
     get_all_user_ids,
     get_app_state,
@@ -51,6 +52,7 @@ from database import (
     get_users_page,
     get_period_stats,
     init_db,
+    mark_trial_used,
     reset_today,
     restore_database_file,
     set_app_state,
@@ -66,6 +68,7 @@ from keyboards import (
     remove_keyboard,
     reports_keyboard,
     subscription_keyboard,
+    trial_keyboard,
 )
 from nutrition import calculate_norm, calculate_remaining
 from openai_service import analyze_food_photo, ask_dietitian
@@ -102,7 +105,20 @@ class AdminPanel(StatesGroup):
 
 
 MONTH_DAYS = 30
-PREMIUM_INVOICE_PAYLOAD = "dietnik_premium_30_rub"
+SUBSCRIPTION_OFFERS = {
+    "basic": {
+        "price": BASIC_PRICE_RUB,
+        "payload": "dietnik_basic_30_rub",
+        "title": "Dietnik Basic на 30 дней",
+        "description": "Фото-учёт еды, дневник КБЖУ, цели и рекомендации.",
+    },
+    "premium": {
+        "price": PREMIUM_PRICE_RUB,
+        "payload": "dietnik_premium_30_rub",
+        "title": "Dietnik Premium на 30 дней",
+        "description": "Всё из Basic, AI-диетолог, рецепты и расширенные отчёты.",
+    },
+}
 
 RECIPE_LIBRARY = [
     {
@@ -206,9 +222,9 @@ WELCOME_TEXT = """
 HELP_TEXT = """
 Как пользоваться:
 1. Пройди настройку через /start
-2. Отправь фото еды
-3. Бот посчитает КБЖУ
-4. Следи за прогрессом за день
+2. Попробуй один анализ фото бесплатно
+3. Выбери Basic или Premium
+4. Отправляй фото еды и следи за прогрессом
 
 Основные кнопки:
 🍽 Добавить еду — отправь фото блюда
@@ -238,20 +254,43 @@ def _safe(value: object) -> str:
     return escape(str(value or ""))
 
 
-def _is_premium(user: dict) -> bool:
-    if user.get("subscription_plan") == "premium" and not user.get("premium_until"):
-        return True
-    premium_until = user.get("premium_until")
-    if not premium_until:
-        return False
+def _subscription_expiry(user: dict) -> date | None:
+    raw_expiry = user.get("subscription_until") or user.get("premium_until")
+    if not raw_expiry:
+        return None
     try:
-        return datetime.fromisoformat(premium_until).date() >= date.today()
+        return datetime.fromisoformat(raw_expiry).date()
     except ValueError:
+        return date.min
+
+
+def _has_active_subscription(user: dict) -> bool:
+    plan = user.get("subscription_plan")
+    if plan not in {"basic", "premium"}:
         return False
+    expiry = _subscription_expiry(user)
+    return expiry is None or expiry >= date.today()
+
+
+def _is_premium(user: dict) -> bool:
+    return user.get("subscription_plan") == "premium" and _has_active_subscription(user)
+
+
+def _trial_available(user: dict) -> bool:
+    return (
+        user.get("subscription_plan") == "trial"
+        and not bool(user.get("trial_used"))
+    )
 
 
 def _subscription_name(user: dict) -> str:
-    return "Premium" if _is_premium(user) else "Basic"
+    if _is_premium(user):
+        return "Premium"
+    if user.get("subscription_plan") == "basic" and _has_active_subscription(user):
+        return "Basic"
+    if _trial_available(user):
+        return "Пробный доступ"
+    return "Нет активной подписки"
 
 
 def _progress_bar(value: int, target: int, width: int = 10) -> str:
@@ -354,18 +393,70 @@ def _format_dashboard(user: dict, stats: dict, first_name: str | None = None) ->
 
 def _format_subscription(user: dict | None) -> str:
     current_plan = _subscription_name(user) if user else "не выбран"
-    premium_until = user.get("premium_until") if user else None
-    premium_line = f"\nPremium активен до: {premium_until}" if user and _is_premium(user) and premium_until else ""
+    expiry = _subscription_expiry(user) if user else None
+    expiry_line = (
+        f"\nДоступ активен до: {expiry.isoformat()}"
+        if user and _has_active_subscription(user) and expiry
+        else ""
+    )
     return (
         "💳 Подписка Dietnik\n\n"
-        f"Текущий тариф: {current_plan}{premium_line}\n\n"
-        "🌱 Basic — бесплатно\n"
+        f"Текущий тариф: {current_plan}{expiry_line}\n\n"
+        f"🌱 Basic — {BASIC_PRICE_RUB} ₽ / 30 дней\n"
         "Дневник · фото-учёт · AI-анализ еды · дневная цель · рекомендации\n\n"
         f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽ / 30 дней\n"
         "Всё из Basic · AI-диетолог · рецепты под остаток КБЖУ · "
         "отчёты за 7, 30 дней и весь период\n\n"
         "Premium делает бота персональным ассистентом, а не просто счётчиком калорий."
     )
+
+
+def _subscription_markup(user: dict) -> InlineKeyboardMarkup:
+    current_plan = (
+        (user.get("subscription_plan") or "trial")
+        if _has_active_subscription(user)
+        else "trial"
+    )
+    return subscription_keyboard(
+        BASIC_PRICE_RUB,
+        PREMIUM_PRICE_RUB,
+        bool(PAYMENT_PROVIDER_TOKEN),
+        current_plan=current_plan,
+    )
+
+
+def _locked_text(user: dict) -> str:
+    if _trial_available(user):
+        return (
+            "Сначала попробуй анализ еды бесплатно: нажми кнопку и отправь одно фото блюда.\n\n"
+            "После пробного анализа выбери Basic или Premium."
+        )
+    return (
+        "🔒 Для этой функции нужна активная подписка.\n\n"
+        f"🌱 Basic — {BASIC_PRICE_RUB} ₽: фото еды, дневник, КБЖУ и рекомендации.\n"
+        f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽: всё из Basic, AI-диетолог, "
+        "рецепты и отчёты."
+    )
+
+
+async def _require_subscription(message: Message, user: dict | None = None) -> bool:
+    user = user or get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала пройди настройку через /start.")
+        return False
+    if _has_active_subscription(user):
+        return True
+    if _trial_available(user):
+        await message.answer(
+            _locked_text(user),
+            reply_markup=trial_keyboard(True),
+        )
+    else:
+        await message.answer(
+            _locked_text(user),
+            reply_markup=_subscription_markup(user),
+        )
+    return False
 
 
 def _format_report(
@@ -533,7 +624,7 @@ def _premium_required_text() -> str:
     return (
         "🌿 Эта функция входит в Premium.\n\n"
         "Premium открывает рецепты под остаток КБЖУ, отчёты и расширенного AI-диетолога.\n"
-        "Открой раздел «💳 Подписка», чтобы посмотреть тарифы."
+        f"Стоимость: {PREMIUM_PRICE_RUB} ₽ на 30 дней."
     )
 
 
@@ -571,8 +662,9 @@ def _admin_help_text() -> str:
         "/admin_stats — статистика проекта\n"
         "/admin_users [страница] — список пользователей\n"
         "/admin_user <telegram_id> — карточка пользователя\n"
+        "/admin_grant_basic <telegram_id> [дней] — выдать Basic\n"
         "/admin_grant_premium <telegram_id> [дней] — выдать Premium\n"
-        "/admin_revoke_premium <telegram_id> — снять Premium\n"
+        "/admin_revoke_premium <telegram_id> — отключить платный доступ\n"
         "/admin_reset_day <telegram_id> — очистить дневник за сегодня\n"
         "/admin_payments [кол-во] — последние платежи\n"
         "/admin_message <telegram_id> <текст> — написать пользователю\n"
@@ -599,7 +691,7 @@ def _commands_text(is_admin: bool = False) -> str:
         "/profile — профиль и дневная норма\n"
         "/recommendations — рекомендации на сегодня\n"
         "/subscription — тарифы и подписка\n"
-        "/terms — условия Premium\n"
+        "/terms — условия подписки\n"
         "/paysupport — помощь с оплатой\n"
         "/help — как пользоваться\n"
         "/commands — список команд\n\n"
@@ -621,8 +713,9 @@ def _commands_text(is_admin: bool = False) -> str:
             "/admin_stats — статистика проекта\n"
             "/admin_users [страница] — список пользователей\n"
             "/admin_user <telegram_id> — карточка пользователя\n"
+            "/admin_grant_basic <telegram_id> [дней] — выдать Basic\n"
             "/admin_grant_premium <telegram_id> [дней] — выдать Premium\n"
-            "/admin_revoke_premium <telegram_id> — снять Premium\n"
+            "/admin_revoke_premium <telegram_id> — отключить платный доступ\n"
             "/admin_reset_day <telegram_id> — очистить дневник пользователя\n"
             "/admin_payments [кол-во] — последние платежи\n"
             "/admin_message <telegram_id> <текст> — написать пользователю\n"
@@ -682,6 +775,26 @@ async def _send_dashboard(message: Message) -> None:
     if not user:
         await message.answer("Сначала пройди настройку через /start.")
         return
+    if not _has_active_subscription(user):
+        trial_available = _trial_available(user)
+        text = (
+            "🎁 Твой пробный анализ готов к запуску\n\n"
+            "Нажми «Попробовать бесплатно» и отправь фото блюда. "
+            "Dietnik распознает еду и покажет калорийность.\n\n"
+            "Пробный анализ доступен один раз и не добавляется в дневник."
+            if trial_available
+            else _locked_text(user)
+        )
+        await message.answer(
+            text,
+            reply_markup=(
+                trial_keyboard(True)
+                if trial_available
+                else _subscription_markup(user)
+            ),
+        )
+        return
+
     stats = get_today_stats(message.from_user.id)
     await message.answer(
         _format_dashboard(user, stats, message.from_user.first_name),
@@ -899,6 +1012,8 @@ async def goal_handler(message: Message, state: FSMContext) -> None:
     )
     await state.clear()
 
+    saved_user = get_user(message.from_user.id) or {}
+    has_access = _has_active_subscription(saved_user)
     await message.answer(
         "✅ Настройка завершена!\n\n"
         f"🎯 Твоя цель: {data['goal']}\n"
@@ -907,8 +1022,12 @@ async def goal_handler(message: Message, state: FSMContext) -> None:
         f"🥩 Белки: {norm['protein']} г\n"
         f"🥑 Жиры: {norm['fat']} г\n"
         f"🍚 Углеводы: {norm['carbs']} г\n\n"
-        "Теперь просто отправь фото еды 🍽",
-        reply_markup=main_menu_keyboard(),
+        + (
+            "Теперь просто отправь фото еды 🍽"
+            if has_access
+            else "Теперь попробуй Dietnik бесплатно: нажми кнопку ниже и отправь одно фото блюда."
+        ),
+        reply_markup=main_menu_keyboard() if has_access else trial_keyboard(True),
     )
     await _send_dashboard(message)
 
@@ -937,8 +1056,7 @@ async def profile_handler(message: Message) -> None:
 @router.message(Command("today"))
 async def today_handler(message: Message) -> None:
     user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
+    if not await _require_subscription(message, user):
         return
 
     stats = get_today_stats(message.from_user.id)
@@ -947,6 +1065,8 @@ async def today_handler(message: Message) -> None:
 
 @router.message(Command("reset_day"))
 async def reset_day_handler(message: Message) -> None:
+    if not await _require_subscription(message):
+        return
     reset_today(message.from_user.id)
     await message.answer("✅ Сегодняшние приёмы пищи удалены.", reply_markup=main_menu_keyboard())
 
@@ -954,8 +1074,7 @@ async def reset_day_handler(message: Message) -> None:
 @router.message(Command("manual_food", "add_manual"))
 async def manual_food_handler(message: Message, state: FSMContext) -> None:
     user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
+    if not await _require_subscription(message, user):
         return
 
     await state.set_state(ManualMeal.dish)
@@ -1039,6 +1158,17 @@ async def manual_meal_carbs_handler(message: Message, state: FSMContext) -> None
 
     data = await state.get_data()
     await state.clear()
+    user = get_user(message.from_user.id)
+    if not user or not _has_active_subscription(user):
+        if user:
+            await message.answer(
+                _locked_text(user),
+                reply_markup=_subscription_markup(user),
+            )
+        else:
+            await message.answer("Сначала пройди настройку через /start.")
+        return
+
     recommendation = "Добавлено вручную. Для максимальной точности сверяй порцию с весами."
     save_meal(
         telegram_id=message.from_user.id,
@@ -1050,7 +1180,6 @@ async def manual_meal_carbs_handler(message: Message, state: FSMContext) -> None
         recommendation=recommendation,
     )
 
-    user = get_user(message.from_user.id)
     stats = get_today_stats(message.from_user.id)
     progress = _format_progress(user, stats)
     await message.answer(
@@ -1093,19 +1222,18 @@ async def subscription_handler(message: Message) -> None:
         return
     await message.answer(
         _format_subscription(user),
-        reply_markup=subscription_keyboard(
-            PREMIUM_PRICE_RUB,
-            bool(PAYMENT_PROVIDER_TOKEN),
-        ),
+        reply_markup=_subscription_markup(user),
     )
 
 
 @router.message(Command("terms"))
 async def terms_handler(message: Message) -> None:
     await message.answer(
-        "📄 Условия Premium\n\n"
-        f"Стоимость: {PREMIUM_PRICE_RUB} ₽ за 30 дней.\n"
-        "Premium открывает AI-диетолога, рецепты и расширенные отчёты.\n"
+        "📄 Условия подписки\n\n"
+        f"Basic: {BASIC_PRICE_RUB} ₽ за 30 дней.\n"
+        f"Premium: {PREMIUM_PRICE_RUB} ₽ за 30 дней.\n\n"
+        "Basic открывает фото-учёт, дневник КБЖУ и рекомендации.\n"
+        "Premium дополнительно открывает AI-диетолога, рецепты и отчёты.\n"
         "После оплаты доступ активируется автоматически.\n\n"
         "Платёж является разовым и не продлевается автоматически.\n\n"
         "Dietnik помогает вести дневник питания, но не заменяет врача. "
@@ -1128,8 +1256,7 @@ async def payment_support_handler(message: Message) -> None:
 @router.message(Command("recommendations"))
 async def recommendations_handler(message: Message) -> None:
     user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start.")
+    if not await _require_subscription(message, user):
         return
     stats = get_today_stats(message.from_user.id)
     await message.answer(
@@ -1149,7 +1276,7 @@ async def _send_report(
         await message.answer("Сначала пройди настройку через /start.")
         return
     if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
+        await message.answer(_premium_required_text(), reply_markup=_subscription_markup(user))
         return
 
     periods = {
@@ -1196,7 +1323,7 @@ async def recipes_handler(message: Message) -> None:
         await message.answer("Сначала пройди настройку через /start.")
         return
     if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=main_menu_keyboard())
+        await message.answer(_premium_required_text(), reply_markup=_subscription_markup(user))
         return
 
     stats = get_today_stats(message.from_user.id)
@@ -1218,7 +1345,7 @@ async def dietitian_handler(message: Message, state: FSMContext) -> None:
         await message.answer(
             "🤖 AI-диетолог входит в Premium.\n\n"
             "В Basic доступны фото-учёт, дневник и короткие рекомендации.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=_subscription_markup(user),
         )
         return
     await message.answer("🤖 Напиши вопрос диетологу одним сообщением.")
@@ -1228,9 +1355,15 @@ async def dietitian_handler(message: Message, state: FSMContext) -> None:
 @router.message(Consultation.question)
 async def dietitian_question_handler(message: Message, state: FSMContext) -> None:
     user = get_user(message.from_user.id)
-    if not user:
+    if not user or not _is_premium(user):
         await state.clear()
-        await message.answer("Сначала пройди настройку через /start.")
+        if user:
+            await message.answer(
+                _premium_required_text(),
+                reply_markup=_subscription_markup(user),
+            )
+        else:
+            await message.answer("Сначала пройди настройку через /start.")
         return
     await message.answer("Думаю над ответом...")
     stats = get_today_stats(message.from_user.id)
@@ -1255,6 +1388,43 @@ async def payment_support_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "start_food_trial")
+async def start_food_trial_callback(callback: CallbackQuery) -> None:
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.message.answer("Сначала пройди анкету через /start.")
+    elif _trial_available(user):
+        await callback.message.answer(
+            "📸 Пришли одно фото блюда.\n\n"
+            "Снимай сверху или под небольшим углом, при хорошем свете. "
+            "Я покажу, что на фото и сколько в блюде калорий.",
+            parse_mode=None,
+        )
+    elif _has_active_subscription(user):
+        await callback.message.answer(
+            "У тебя уже есть активная подписка. Просто отправь фото еды."
+        )
+    else:
+        await callback.message.answer(
+            "Пробный анализ уже использован. Выбери подписку, чтобы продолжить.",
+            reply_markup=_subscription_markup(user),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "show_subscriptions")
+async def show_subscriptions_callback(callback: CallbackQuery) -> None:
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.message.answer("Сначала пройди анкету через /start.")
+    else:
+        await callback.message.answer(
+            _format_subscription(user),
+            reply_markup=_subscription_markup(user),
+        )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "payment_unavailable")
 async def payment_unavailable_callback(callback: CallbackQuery) -> None:
     await callback.message.answer(
@@ -1265,36 +1435,50 @@ async def payment_unavailable_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "buy_premium")
+@router.callback_query(F.data.in_({"buy_basic", "buy_premium"}))
 async def buy_subscription_handler(callback: CallbackQuery, bot: Bot) -> None:
     if not PAYMENT_PROVIDER_TOKEN:
         await payment_unavailable_callback(callback)
         return
 
+    plan = callback.data.removeprefix("buy_")
+    offer = SUBSCRIPTION_OFFERS[plan]
+    user = get_user(callback.from_user.id)
+    if plan == "basic" and user and _is_premium(user):
+        await callback.answer("У тебя уже активен Premium", show_alert=True)
+        return
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
-        title="Dietnik Premium на 30 дней",
-        description="AI-диетолог, рецепты под остаток КБЖУ и расширенные отчёты.",
-        payload=PREMIUM_INVOICE_PAYLOAD,
+        title=offer["title"],
+        description=offer["description"],
+        payload=offer["payload"],
         provider_token=PAYMENT_PROVIDER_TOKEN,
         currency="RUB",
         prices=[
             LabeledPrice(
-                label="Dietnik Premium на 30 дней",
-                amount=PREMIUM_PRICE_RUB * 100,
+                label=offer["title"],
+                amount=offer["price"] * 100,
             )
         ],
-        start_parameter="dietnik-premium-30",
+        start_parameter=f"dietnik-{plan}-30",
     )
     await callback.answer()
 
 
 @router.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
-    valid = (
-        pre_checkout_query.invoice_payload == PREMIUM_INVOICE_PAYLOAD
+    offer = next(
+        (
+            value
+            for value in SUBSCRIPTION_OFFERS.values()
+            if value["payload"] == pre_checkout_query.invoice_payload
+        ),
+        None,
+    )
+    valid = bool(
+        offer
         and pre_checkout_query.currency == "RUB"
-        and pre_checkout_query.total_amount == PREMIUM_PRICE_RUB * 100
+        and pre_checkout_query.total_amount == offer["price"] * 100
     )
     if valid:
         await pre_checkout_query.answer(ok=True)
@@ -1308,10 +1492,18 @@ async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message, bot: Bot) -> None:
     payment = message.successful_payment
+    plan_and_offer = next(
+        (
+            (plan, offer)
+            for plan, offer in SUBSCRIPTION_OFFERS.items()
+            if offer["payload"] == payment.invoice_payload
+        ),
+        None,
+    )
     if (
-        payment.invoice_payload != PREMIUM_INVOICE_PAYLOAD
+        not plan_and_offer
         or payment.currency != "RUB"
-        or payment.total_amount != PREMIUM_PRICE_RUB * 100
+        or payment.total_amount != plan_and_offer[1]["price"] * 100
     ):
         logger.error(
             "Rejected unexpected successful payment user_id=%s payload=%r currency=%s amount=%s",
@@ -1327,13 +1519,14 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
         )
         return
 
+    plan, offer = plan_and_offer
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала пройди настройку через /start, затем напиши /paysupport.")
         return
 
     start_date = date.today()
-    current_until = user.get("premium_until")
+    current_until = user.get("subscription_until") or user.get("premium_until")
     if current_until:
         try:
             parsed_until = date.fromisoformat(current_until)
@@ -1341,28 +1534,29 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
                 start_date = parsed_until
         except ValueError:
             pass
-    premium_until = (start_date + timedelta(days=MONTH_DAYS)).isoformat()
+    subscription_until = (start_date + timedelta(days=MONTH_DAYS)).isoformat()
 
-    inserted = activate_premium_payment(
+    inserted = activate_subscription_payment(
         telegram_id=message.from_user.id,
+        plan=plan,
         amount=payment.total_amount,
         currency=payment.currency,
         provider_payment_charge_id=payment.provider_payment_charge_id or "",
         telegram_payment_charge_id=payment.telegram_payment_charge_id,
         invoice_payload=payment.invoice_payload,
-        premium_until=premium_until,
+        subscription_until=subscription_until,
         is_recurring=bool(getattr(payment, "is_recurring", False)),
     )
     if not inserted:
         await message.answer(
-            "✅ Этот платёж уже обработан. Premium остаётся активным.",
+            "✅ Этот платёж уже обработан. Подписка остаётся активной.",
             reply_markup=main_menu_keyboard(),
         )
         return
 
     await message.answer(
         "✅ Оплата прошла успешно!\n\n"
-        f"Premium активирован до {premium_until}.\n"
+        f"{offer['title']} активирован до {subscription_until}.\n"
         "Спасибо, что поддерживаешь Dietnik.",
         reply_markup=main_menu_keyboard(),
     )
@@ -1389,6 +1583,7 @@ async def admin_health_handler(message: Message) -> None:
         f"ADMIN_IDS настроены: {'да' if ADMIN_IDS else 'нет'}\n"
         f"OpenAI ключ: {'есть' if OPENAI_API_KEY else 'нет'}\n"
         f"Оплата ЮKassa: {'подключена' if PAYMENT_PROVIDER_TOKEN else 'не подключена'}\n"
+        f"Цена Basic: {BASIC_PRICE_RUB} RUB\n"
         f"Цена Premium: {PREMIUM_PRICE_RUB} RUB\n"
         f"DATA_DIR: {DATA_DIR}\n"
         f"DB_PATH: {DB_PATH}\n"
@@ -1415,6 +1610,8 @@ async def dbstatus_handler(message: Message) -> None:
         f"Пользователей: {status['users_count']}\n"
         f"Платежей/заказов: {status['payments_count']}\n"
         f"Куплено единиц по валютам: {payment_totals}\n"
+        f"Пробный режим: {status['trial_users']}\n"
+        f"Basic пользователей: {status['basic_users']}\n"
         f"Premium пользователей: {status['premium_users']}\n"
         f"База лежит в /app/data: {'да' if status['in_app_data'] else 'нет'}\n"
         f"База лежит в DATA_DIR: {'да' if status['in_data_dir'] else 'нет'}\n"
@@ -1492,6 +1689,8 @@ async def admin_stats_handler(message: Message) -> None:
     await message.answer(
         "📊 Статистика Dietnik\n\n"
         f"Пользователи: {stats['users_count']}\n"
+        f"Пробный режим: {stats['trial_users']}\n"
+        f"Basic: {stats['basic_users']}\n"
         f"Premium: {stats['premium_users']}\n"
         f"Активны сегодня: {stats['active_today']}\n"
         f"Приёмов пищи сегодня: {stats['meals_today']}\n"
@@ -1555,7 +1754,8 @@ async def admin_user_handler(message: Message) -> None:
         "👤 Карточка пользователя\n\n"
         f"ID: <code>{telegram_id}</code>\n"
         f"Тариф: {_subscription_name(user)}\n"
-        f"Premium до: {user.get('premium_until') or '-'}\n"
+        f"Подписка до: {user.get('subscription_until') or user.get('premium_until') or '-'}\n"
+        f"Пробный анализ использован: {'да' if user.get('trial_used') else 'нет'}\n"
         f"Цель: {user['goal']}\n"
         f"Возраст: {user['age']}\n"
         f"Рост: {user['height']} см\n"
@@ -1592,7 +1792,34 @@ async def admin_grant_premium_handler(message: Message, bot: Bot) -> None:
     await _maybe_auto_backup_db(bot, "admin_grant_premium")
 
 
-@router.message(Command("admin_revoke_premium"))
+@router.message(Command("admin_grant_basic"))
+async def admin_grant_basic_handler(message: Message, bot: Bot) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    args = _command_args(message).split()
+    telegram_id = _parse_user_id(args[0]) if args else None
+    days = _parse_user_id(args[1]) if len(args) > 1 else MONTH_DAYS
+    if not telegram_id or not days:
+        await message.answer(
+            "Формат: /admin_grant_basic <telegram_id> [дней]",
+            parse_mode=None,
+        )
+        return
+    if not get_user(telegram_id):
+        await message.answer("Пользователь не найден. Он должен сначала пройти /start.")
+        return
+
+    subscription_until = (datetime.now() + timedelta(days=days)).date().isoformat()
+    set_subscription(telegram_id, "basic", subscription_until)
+    await message.answer(
+        f"✅ Basic выдан пользователю {telegram_id} до {subscription_until}."
+    )
+    await _maybe_auto_backup_db(bot, "admin_grant_basic")
+
+
+@router.message(Command("admin_revoke_premium", "admin_revoke_subscription"))
 async def admin_revoke_premium_handler(message: Message, bot: Bot) -> None:
     if not _is_admin(message):
         await _deny_admin(message)
@@ -1609,8 +1836,9 @@ async def admin_revoke_premium_handler(message: Message, bot: Bot) -> None:
         await message.answer("Пользователь не найден.")
         return
 
-    set_subscription(telegram_id, "basic", None)
-    await message.answer(f"✅ Пользователь {telegram_id} переведён на Basic.")
+    set_subscription(telegram_id, "trial", None)
+    mark_trial_used(telegram_id)
+    await message.answer(f"✅ Платный доступ пользователя {telegram_id} отключён.")
     await _maybe_auto_backup_db(bot, "admin_revoke_premium")
 
 
@@ -1859,6 +2087,9 @@ async def plain_my_id_handler(message: Message) -> None:
 )
 async def menu_button_handler(message: Message, state: FSMContext) -> None:
     if message.text == "🍽 Добавить еду":
+        user = get_user(message.from_user.id)
+        if not await _require_subscription(message, user):
+            return
         await message.answer(
             "Пришли фото блюда, и я посчитаю КБЖУ.\n\n"
             "Если уже знаешь КБЖУ, напиши «добавить вручную» или /manual_food.",
@@ -1887,7 +2118,17 @@ async def photo_handler(message: Message, bot: Bot) -> None:
         await message.answer("Сначала пройди настройку через /start.")
         return
 
-    await message.answer("📸 Анализирую фото еды...")
+    is_trial = _trial_available(user)
+    if not is_trial and not _has_active_subscription(user):
+        await message.answer(
+            _locked_text(user),
+            reply_markup=_subscription_markup(user),
+        )
+        return
+
+    await message.answer(
+        "📸 Пробую распознать блюдо..." if is_trial else "📸 Анализирую фото еды..."
+    )
 
     try:
         photo = message.photo[-1]
@@ -1901,16 +2142,37 @@ async def photo_handler(message: Message, bot: Bot) -> None:
     if not result:
         await message.answer(
             "Не получилось точно распознать блюдо.\n\n"
-            "Попробуй отправить фото ещё раз или напиши «добавить вручную».",
-            reply_markup=main_menu_keyboard(),
+            "Попробуй отправить фото ещё раз.",
+            reply_markup=trial_keyboard(True) if is_trial else main_menu_keyboard(),
         )
         return
     if not result.get("is_food", True):
         await message.answer(
             "На фото не вижу еды.\n\n"
-            "Сфотографируй блюдо ближе, при хорошем свете и без лишних предметов в кадре.\n"
-            "Если КБЖУ уже известны, напиши «добавить вручную».",
-            reply_markup=main_menu_keyboard(),
+            "Сфотографируй блюдо ближе, при хорошем свете и без лишних предметов в кадре.",
+            reply_markup=trial_keyboard(True) if is_trial else main_menu_keyboard(),
+        )
+        return
+
+    if is_trial:
+        if not mark_trial_used(message.from_user.id):
+            latest_user = get_user(message.from_user.id) or user
+            await message.answer(
+                "Пробный анализ уже использован. Выбери подписку, чтобы продолжить.",
+                reply_markup=_subscription_markup(latest_user),
+            )
+            return
+        trial_user = get_user(message.from_user.id) or user
+        await message.answer(
+            "✨ Вот как работает Dietnik\n\n"
+            f"🍽 На фото: {_safe(result['dish'])}\n"
+            f"🔥 Калорийность: {result['calories']} ккал\n\n"
+            "Это был бесплатный пробный анализ. Он не добавлен в дневник.\n\n"
+            f"🌱 Basic — {BASIC_PRICE_RUB} ₽ / 30 дней\n"
+            "Анализ фото · полный КБЖУ · дневник · дневная цель · рекомендации\n\n"
+            f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽ / 30 дней\n"
+            "Всё из Basic · AI-диетолог · рецепты · отчёты за 7, 30 дней и весь период",
+            reply_markup=_subscription_markup(trial_user),
         )
         return
 

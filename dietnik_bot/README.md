@@ -74,7 +74,7 @@ cp .env.example .env
 
 ```env
 BOT_TOKEN=твой_telegram_bot_token
-BOT_RELEASE=2026.06.07-support-2
+BOT_RELEASE=2026.06.07-payments-1
 OPENAI_API_KEY=твой_openai_api_key
 PAYMENT_PROVIDER_TOKEN=платёжный_токен_ЮKassa_из_BotFather
 SUPPORT_USERNAME=@твой_аккаунт_поддержки
@@ -85,6 +85,7 @@ SUPPORT_MESSAGE_MAX_CHARS=1500
 SUPPORT_ATTACHMENT_MAX_FILE_BYTES=10485760
 BASIC_PRICE_RUB=490
 PREMIUM_PRICE_RUB=890
+YOOKASSA_VAT_CODE=1
 ADMIN_IDS=твой_telegram_id
 DATA_DIR=/app/data
 DB_PATH=/app/data/bot.db
@@ -132,7 +133,8 @@ python3 main.py
   - `DATA_DIR=/app/data`
   - `DB_PATH=/app/data/bot.db`
   - `PERSISTENCE_PATH=/app/data/bot_state.pkl`
-- Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN`, `BASIC_PRICE_RUB` и `PREMIUM_PRICE_RUB`
+- Для оплаты: добавь `PAYMENT_PROVIDER_TOKEN`, `BASIC_PRICE_RUB`,
+  `PREMIUM_PRICE_RUB` и `YOOKASSA_VAT_CODE`
 - Для админки: добавь `ADMIN_IDS`, например `123456789` или несколько ID через запятую
 - Для автобэкапа: `AUTO_DB_BACKUP_INTERVAL_HOURS=6`
 
@@ -273,9 +275,16 @@ PERSISTENCE_PATH=/app/data/bot_state.pkl
 PAYMENT_PROVIDER_TOKEN=токен_из_BotFather
 BASIC_PRICE_RUB=490
 PREMIUM_PRICE_RUB=890
+YOOKASSA_VAT_CODE=1
 ```
 
 7. Сделай редеплой и проверь покупку из раздела «Подписка».
+
+После выбора Basic или Premium бот сначала спрашивает email для электронного
+чека, затем создаёт персональную ссылку на счёт ЮKassa. Каждый счёт получает
+уникальный `payload`, поэтому бот проверяет пользователя, тариф и сумму перед
+оплатой. `YOOKASSA_VAT_CODE=1` означает «без НДС»; если у магазина другая
+налоговая настройка, укажи код из настроек ЮKassa.
 
 Интеграция через Telegram Payments не поддерживает автоматические списания:
 пользователь покупает следующие 30 дней вручную. Для автопродления потребуется
@@ -317,7 +326,7 @@ SUPPORT_ADMIN_CHAT_ID=-1001234567890
 /version
 ```
 
-Бот должен показать `2026.06.07-support-2`. Если показывает старую версию или
+Бот должен показать `2026.06.07-payments-1`. Если показывает старую версию или
 не знает команду, BotHost ещё запускает предыдущий commit. Проверь логи сборки,
 ветку `main` и останови другие копии бота с тем же `BOT_TOKEN`.
 
@@ -328,6 +337,10 @@ SUPPORT_ADMIN_CHAT_ID=-1001234567890
 ```text
 /reply 123456789 Проверили оплату, подписка активирована.
 ```
+
+Ответы работают и от обычного администратора группы, и при включённом режиме
+«Оставаться анонимным». Бот также запоминает ответы внутри ветки, поэтому можно
+продолжать диалог, отвечая на предыдущее сообщение администратора.
 
 Если `SUPPORT_ADMIN_CHAT_ID` не задан, обращения отправляются администраторам
 из `ADMIN_IDS` в личные сообщения.

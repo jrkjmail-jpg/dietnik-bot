@@ -1,7 +1,10 @@
 """Telegram bot entry point for Dietnik."""
 
 import asyncio
+import json
 import logging
+import re
+import secrets
 import tempfile
 from datetime import date, datetime, timedelta
 from html import escape
@@ -9,7 +12,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatMemberStatus, ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,6 +43,7 @@ from config import (
     SUPPORT_ATTACHMENT_MAX_FILE_BYTES,
     SUPPORT_MESSAGE_MAX_CHARS,
     SUPPORT_USERNAME,
+    YOOKASSA_VAT_CODE,
     validate_config,
 )
 from database import (
@@ -58,6 +62,7 @@ from database import (
     get_user_meals,
     get_users_page,
     get_period_stats,
+    get_payment_intent,
     init_db,
     ensure_support_thread,
     get_recent_support_messages,
@@ -69,6 +74,7 @@ from database import (
     set_app_state,
     set_support_status,
     save_meal,
+    save_payment_intent,
     save_user,
     set_subscription,
 )
@@ -108,6 +114,10 @@ class SupportChat(StatesGroup):
     active = State()
 
 
+class PaymentCheckout(StatesGroup):
+    email = State()
+
+
 class ManualMeal(StatesGroup):
     dish = State()
     calories = State()
@@ -136,6 +146,7 @@ SUBSCRIPTION_OFFERS = {
         "description": "Всё из Basic, AI-диетолог, рецепты и расширенные отчёты.",
     },
 }
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 RECIPE_LIBRARY = [
     {
@@ -441,6 +452,49 @@ def _subscription_markup(user: dict) -> InlineKeyboardMarkup:
         bool(PAYMENT_PROVIDER_TOKEN),
         current_plan=current_plan,
     )
+
+
+def _new_payment_payload(telegram_id: int, plan: str) -> str:
+    token = secrets.token_urlsafe(9)
+    return f"dietnik:{plan}:30:{telegram_id}:{token}"
+
+
+def _yookassa_provider_data(offer: dict, email: str) -> str:
+    """Build fiscal receipt data when email was collected in the bot dialog."""
+    return json.dumps(
+        {
+            "receipt": {
+                "customer": {"email": email},
+                "items": [
+                    {
+                        "description": offer["title"],
+                        "quantity": "1.00",
+                        "amount": {
+                            "value": f"{offer['price']:.2f}",
+                            "currency": "RUB",
+                        },
+                        "vat_code": YOOKASSA_VAT_CODE,
+                        "payment_mode": "full_payment",
+                        "payment_subject": "service",
+                    }
+                ],
+            }
+        },
+        ensure_ascii=False,
+    )
+
+
+def _payment_details(payload: str) -> tuple[str, dict, dict | None] | None:
+    intent = get_payment_intent(payload)
+    if intent:
+        offer = SUBSCRIPTION_OFFERS.get(intent["plan"])
+        if offer:
+            return intent["plan"], offer, intent
+        return None
+    for plan, offer in SUBSCRIPTION_OFFERS.items():
+        if offer["payload"] == payload:
+            return plan, offer, None
+    return None
 
 
 def _locked_text(user: dict) -> str:
@@ -888,6 +942,37 @@ def _is_support_admin_chat(message: Message) -> bool:
     )
 
 
+async def _is_support_group_admin(message: Message, bot: Bot) -> bool:
+    """Authorize configured admins and Telegram group administrators."""
+    if not _is_support_admin_chat(message):
+        return False
+    if message.from_user and message.from_user.id in ADMIN_IDS:
+        return True
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        return True
+    if not message.from_user:
+        return False
+    try:
+        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    except Exception as exc:
+        logger.warning(
+            "Could not verify support group admin user_id=%s: %s",
+            message.from_user.id,
+            exc,
+        )
+        return False
+    return member.status in {
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.CREATOR,
+    }
+
+
+def _support_user_id_from_text(text: str | None) -> int | None:
+    """Recover a ticket owner from the visible escalation text."""
+    match = re.search(r"Пользователь:\s*(\d+)", text or "")
+    return int(match.group(1)) if match else None
+
+
 def _is_admin(message: Message | CallbackQuery) -> bool:
     user = message.from_user
     return bool(user and user.id in ADMIN_IDS)
@@ -1222,7 +1307,13 @@ async def support_reply_command_handler(message: Message, bot: Bot) -> None:
     )
 )
 async def support_group_reply_handler(message: Message, bot: Bot) -> None:
-    if not _is_admin(message):
+    if not await _is_support_group_admin(message, bot):
+        logger.warning(
+            "Ignored unauthorized support reply chat_id=%s user_id=%s sender_chat_id=%s",
+            message.chat.id,
+            message.from_user.id if message.from_user else None,
+            message.sender_chat.id if message.sender_chat else None,
+        )
         return
     if not message.reply_to_message:
         await message.answer(
@@ -1236,6 +1327,10 @@ async def support_group_reply_handler(message: Message, bot: Bot) -> None:
         message.reply_to_message.message_id,
     )
     if not telegram_id:
+        telegram_id = _support_user_id_from_text(
+            message.reply_to_message.text or message.reply_to_message.caption
+        )
+    if not telegram_id:
         await message.answer(
             "Не нашёл пользователя для этого сообщения. "
             "Ответь на исходное обращение или используй /reply.",
@@ -1246,6 +1341,11 @@ async def support_group_reply_handler(message: Message, bot: Bot) -> None:
     if not reply_text:
         await message.answer("Пока поддерживаются текстовые ответы администратора.")
         return
+    remember_support_admin_message(
+        message.chat.id,
+        message.message_id,
+        telegram_id,
+    )
     sent = await _send_support_reply(bot, telegram_id, reply_text)
     await message.answer(
         "✅ Ответ отправлен пользователю."
@@ -1921,49 +2021,136 @@ async def payment_unavailable_callback(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.in_({"buy_basic", "buy_premium"}))
-async def buy_subscription_handler(callback: CallbackQuery, bot: Bot) -> None:
+async def buy_subscription_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
     if not PAYMENT_PROVIDER_TOKEN:
         await payment_unavailable_callback(callback)
         return
 
     plan = callback.data.removeprefix("buy_")
-    offer = SUBSCRIPTION_OFFERS[plan]
     user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала пройди анкету через /start", show_alert=True)
+        return
     if plan == "basic" and user and _is_premium(user):
         await callback.answer("У тебя уже активен Premium", show_alert=True)
         return
-    await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title=offer["title"],
-        description=offer["description"],
-        payload=offer["payload"],
-        provider_token=PAYMENT_PROVIDER_TOKEN,
-        currency="RUB",
-        prices=[
-            LabeledPrice(
-                label=offer["title"],
-                amount=offer["price"] * 100,
-            )
-        ],
-        start_parameter=f"dietnik-{plan}-30",
-    )
     await callback.answer()
+    await state.clear()
+    await state.set_state(PaymentCheckout.email)
+    await state.update_data(payment_plan=plan)
+    await callback.message.answer(
+        "📧 Укажи email для электронного чека ЮKassa.\n\n"
+        "Например: name@example.com\n"
+        "Для отмены отправь /cancel.",
+        parse_mode=None,
+    )
+
+
+@router.message(PaymentCheckout.email)
+async def payment_email_handler(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    email = (message.text or "").strip().casefold()
+    if not EMAIL_PATTERN.fullmatch(email) or len(email) > 254:
+        await message.answer(
+            "Проверь email и отправь ещё раз.\n"
+            "Пример: name@example.com",
+            parse_mode=None,
+        )
+        return
+
+    data = await state.get_data()
+    plan = data.get("payment_plan")
+    offer = SUBSCRIPTION_OFFERS.get(plan)
+    user = get_user(message.from_user.id)
+    if not offer or not user:
+        await state.clear()
+        await message.answer(
+            "Не удалось восстановить выбранный тариф. Открой раздел «Подписка» ещё раз.",
+            reply_markup=main_menu_keyboard(),
+            parse_mode=None,
+        )
+        return
+
+    payload = _new_payment_payload(message.from_user.id, plan)
+    amount = offer["price"] * 100
+    try:
+        save_payment_intent(
+            payload=payload,
+            telegram_id=message.from_user.id,
+            plan=plan,
+            amount=amount,
+            currency="RUB",
+            customer_email=email,
+        )
+        invoice_link = await bot.create_invoice_link(
+            title=offer["title"],
+            description=offer["description"],
+            payload=payload,
+            provider_token=PAYMENT_PROVIDER_TOKEN,
+            currency="RUB",
+            prices=[LabeledPrice(label=offer["title"], amount=amount)],
+            provider_data=_yookassa_provider_data(offer, email),
+        )
+    except Exception:
+        logger.exception(
+            "Could not create YooKassa invoice user_id=%s plan=%s",
+            message.from_user.id,
+            plan,
+        )
+        await message.answer(
+            "Не получилось создать счёт ЮKassa. Попробуй ещё раз через раздел "
+            "«Подписка» или напиши /paysupport.",
+            reply_markup=main_menu_keyboard(),
+            parse_mode=None,
+        )
+        await state.clear()
+        return
+
+    await state.clear()
+    await message.answer(
+        "✅ Счёт готов\n\n"
+        f"Тариф: {offer['title']}\n"
+        f"Сумма: {offer['price']} ₽\n"
+        f"Чек придёт на: {email}\n\n"
+        "Нажми кнопку ниже, чтобы перейти к безопасной оплате через ЮKassa.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"Оплатить {offer['price']} ₽",
+                        url=invoice_link,
+                    )
+                ]
+            ]
+        ),
+        parse_mode=None,
+    )
 
 
 @router.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
-    offer = next(
-        (
-            value
-            for value in SUBSCRIPTION_OFFERS.values()
-            if value["payload"] == pre_checkout_query.invoice_payload
-        ),
-        None,
-    )
+    details = _payment_details(pre_checkout_query.invoice_payload)
+    offer = details[1] if details else None
+    intent = details[2] if details else None
     valid = bool(
         offer
         and pre_checkout_query.currency == "RUB"
         and pre_checkout_query.total_amount == offer["price"] * 100
+        and (
+            intent is None
+            or (
+                intent["telegram_id"] == pre_checkout_query.from_user.id
+                and intent["amount"] == pre_checkout_query.total_amount
+                and intent["currency"] == pre_checkout_query.currency
+                and intent["status"] == "created"
+            )
+        )
     )
     if valid:
         await pre_checkout_query.answer(ok=True)
@@ -1977,18 +2164,15 @@ async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message, bot: Bot) -> None:
     payment = message.successful_payment
-    plan_and_offer = next(
-        (
-            (plan, offer)
-            for plan, offer in SUBSCRIPTION_OFFERS.items()
-            if offer["payload"] == payment.invoice_payload
-        ),
-        None,
-    )
+    details = _payment_details(payment.invoice_payload)
     if (
-        not plan_and_offer
+        not details
         or payment.currency != "RUB"
-        or payment.total_amount != plan_and_offer[1]["price"] * 100
+        or payment.total_amount != details[1]["price"] * 100
+        or (
+            details[2] is not None
+            and details[2]["telegram_id"] != message.from_user.id
+        )
     ):
         logger.error(
             "Rejected unexpected successful payment user_id=%s payload=%r currency=%s amount=%s",
@@ -2004,7 +2188,7 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
         )
         return
 
-    plan, offer = plan_and_offer
+    plan, offer, intent = details
     user = get_user(message.from_user.id)
     if not user:
         await message.answer("Сначала пройди настройку через /start, затем напиши /paysupport.")
@@ -2031,6 +2215,11 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
         invoice_payload=payment.invoice_payload,
         subscription_until=subscription_until,
         is_recurring=bool(getattr(payment, "is_recurring", False)),
+        customer_email=(
+            intent["customer_email"]
+            if intent
+            else getattr(getattr(payment, "order_info", None), "email", None)
+        ),
     )
     if not inserted:
         await message.answer(

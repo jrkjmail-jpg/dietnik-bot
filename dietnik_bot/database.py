@@ -128,6 +128,21 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS payment_intents (
+                payload TEXT PRIMARY KEY,
+                telegram_id INTEGER NOT NULL,
+                plan TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                customer_email TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'created',
+                created_at TEXT NOT NULL,
+                paid_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS support_threads (
                 telegram_id INTEGER PRIMARY KEY,
                 status TEXT NOT NULL DEFAULT 'ai',
@@ -162,6 +177,7 @@ def init_db() -> None:
         _ensure_column(conn, "subscriptions", "invoice_payload", "TEXT")
         _ensure_column(conn, "subscriptions", "subscription_expires_at", "TEXT")
         _ensure_column(conn, "subscriptions", "is_recurring", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "subscriptions", "customer_email", "TEXT")
         conn.execute(
             """
             DELETE FROM subscriptions
@@ -415,6 +431,48 @@ def get_user(telegram_id: int) -> Optional[dict]:
         row = conn.execute(
             "SELECT * FROM users WHERE telegram_id = ?",
             (telegram_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_payment_intent(
+    payload: str,
+    telegram_id: int,
+    plan: str,
+    amount: int,
+    currency: str,
+    customer_email: str,
+) -> None:
+    """Persist an invoice before its payment link is shown to the user."""
+    if plan not in {"basic", "premium"}:
+        raise ValueError("Unsupported subscription plan")
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO payment_intents (
+                payload, telegram_id, plan, amount, currency,
+                customer_email, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'created', ?)
+            """,
+            (
+                payload,
+                telegram_id,
+                plan,
+                amount,
+                currency,
+                customer_email,
+                _now(),
+            ),
+        )
+
+
+def get_payment_intent(payload: str) -> Optional[dict]:
+    """Return a pending or completed invoice by its unique payload."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM payment_intents WHERE payload = ?",
+            (payload,),
         ).fetchone()
     return dict(row) if row else None
 
@@ -760,6 +818,7 @@ def activate_subscription_payment(
     invoice_payload: str,
     subscription_until: str,
     is_recurring: bool = False,
+    customer_email: str | None = None,
 ) -> bool:
     """Atomically store a new payment and activate the selected plan."""
     if plan not in {"basic", "premium"}:
@@ -771,9 +830,10 @@ def activate_subscription_payment(
             INSERT OR IGNORE INTO subscriptions (
                 telegram_id, plan, amount, currency,
                 provider_payment_charge_id, telegram_payment_charge_id,
-                invoice_payload, subscription_expires_at, is_recurring, created_at
+                invoice_payload, subscription_expires_at, is_recurring,
+                customer_email, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 telegram_id,
@@ -785,6 +845,7 @@ def activate_subscription_payment(
                 invoice_payload,
                 subscription_until,
                 int(is_recurring),
+                customer_email,
                 _now(),
             ),
         )
@@ -798,6 +859,14 @@ def activate_subscription_payment(
             WHERE telegram_id = ?
             """,
             (plan, subscription_until, premium_until, _now(), telegram_id),
+        )
+        conn.execute(
+            """
+            UPDATE payment_intents
+            SET status = 'paid', paid_at = ?
+            WHERE payload = ?
+            """,
+            (_now(), invoice_payload),
         )
     return True
 

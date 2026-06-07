@@ -20,7 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
-BOT_RELEASE = os.getenv("BOT_RELEASE", "2026.06.07-support-2")
+BOT_RELEASE = os.getenv("BOT_RELEASE", "2026.06.07-payments-1")
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -41,6 +41,7 @@ def _get_bool_env(name: str, default: bool) -> bool:
 AUTO_DB_BACKUP_INTERVAL_HOURS = _get_int_env("AUTO_DB_BACKUP_INTERVAL_HOURS", 6)
 BASIC_PRICE_RUB = max(1, _get_int_env("BASIC_PRICE_RUB", 490))
 PREMIUM_PRICE_RUB = max(1, _get_int_env("PREMIUM_PRICE_RUB", 890))
+YOOKASSA_VAT_CODE = min(6, max(1, _get_int_env("YOOKASSA_VAT_CODE", 1)))
 SUPPORT_AI_ENABLED = _get_bool_env("SUPPORT_AI_ENABLED", True)
 SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-4o-mini")
 SUPPORT_MESSAGE_MAX_CHARS = max(200, _get_int_env("SUPPORT_MESSAGE_MAX_CHARS", 1500))

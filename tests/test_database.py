@@ -61,6 +61,14 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(database.get_user(1001)["trial_used"], 1)
 
     def test_payment_is_idempotent_and_activates_basic(self) -> None:
+        database.save_payment_intent(
+            payload="dietnik:basic:30:1001:test",
+            telegram_id=1001,
+            plan="basic",
+            amount=49000,
+            currency="RUB",
+            customer_email="user@example.com",
+        )
         first = database.activate_subscription_payment(
             telegram_id=1001,
             plan="basic",
@@ -68,8 +76,9 @@ class DatabaseTests(unittest.TestCase):
             currency="RUB",
             provider_payment_charge_id="provider-1",
             telegram_payment_charge_id="telegram-1",
-            invoice_payload="dietnik_basic_30_rub",
+            invoice_payload="dietnik:basic:30:1001:test",
             subscription_until="2026-07-07",
+            customer_email="user@example.com",
         )
         second = database.activate_subscription_payment(
             telegram_id=1001,
@@ -78,8 +87,9 @@ class DatabaseTests(unittest.TestCase):
             currency="RUB",
             provider_payment_charge_id="provider-1",
             telegram_payment_charge_id="telegram-1",
-            invoice_payload="dietnik_basic_30_rub",
+            invoice_payload="dietnik:basic:30:1001:test",
             subscription_until="2026-08-06",
+            customer_email="user@example.com",
         )
 
         self.assertTrue(first)
@@ -89,6 +99,15 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(database.get_user(1001)["premium_until"])
         self.assertEqual(database.get_admin_stats()["payments_count"], 1)
         self.assertEqual(database.get_admin_stats()["payment_totals"], {"RUB": 49000})
+        intent = database.get_payment_intent("dietnik:basic:30:1001:test")
+        self.assertEqual(intent["status"], "paid")
+        self.assertEqual(intent["customer_email"], "user@example.com")
+
+        with sqlite3.connect(database.DB_PATH) as conn:
+            email = conn.execute(
+                "SELECT customer_email FROM subscriptions"
+            ).fetchone()[0]
+        self.assertEqual(email, "user@example.com")
 
     def test_premium_payment_sets_legacy_and_generic_expiry(self) -> None:
         inserted = database.activate_subscription_payment(
@@ -114,6 +133,7 @@ class DatabaseTests(unittest.TestCase):
         database.log_support_message(1001, "ai", "Передаю вопрос администратору")
         database.set_support_status(1001, "admin")
         database.remember_support_admin_message(-100500, 77, 1001)
+        database.remember_support_admin_message(-100500, 78, 1001)
 
         history = database.get_recent_support_messages(1001)
         self.assertEqual(
@@ -126,6 +146,10 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(database.get_support_status(1001), "admin")
         self.assertEqual(
             database.get_support_user_by_admin_message(-100500, 77),
+            1001,
+        )
+        self.assertEqual(
+            database.get_support_user_by_admin_message(-100500, 78),
             1001,
         )
         stats = database.get_admin_stats()

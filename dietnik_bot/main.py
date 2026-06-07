@@ -27,6 +27,7 @@ from config import (
     ADMIN_IDS,
     AUTO_DB_BACKUP_INTERVAL_HOURS,
     BASIC_PRICE_RUB,
+    BOT_RELEASE,
     BOT_TOKEN,
     DATA_DIR,
     DB_PATH,
@@ -955,6 +956,7 @@ def _commands_text(is_admin: bool = False) -> str:
         "/terms — условия подписки\n"
         "/paysupport — помощь с оплатой\n"
         "/support — открыть поддержку\n"
+        "/version — версия запущенного бота\n"
         "/help — как пользоваться\n"
         "/commands — список команд\n\n"
         "Premium:\n"
@@ -1032,6 +1034,14 @@ def _storage_admin_command(text: str | None) -> str:
         "restore_db": "restoredb",
     }
     return aliases.get(command, "")
+
+
+def _is_support_chat_id_request(text: str | None) -> bool:
+    return _normalize_command_text(text) in {
+        "supportchatid",
+        "support_chat_id",
+        "supportid",
+    }
 
 
 async def _send_dashboard(message: Message) -> None:
@@ -1161,7 +1171,7 @@ async def storage_admin_router(message: Message, state: FSMContext, bot: Bot) ->
         await restoredb_handler(message, state)
 
 
-@router.message(Command("supportchatid"))
+@router.message(lambda message: _is_support_chat_id_request(message.text))
 async def support_chat_id_handler(message: Message) -> None:
     if not _is_admin(message):
         await _deny_admin(message)
@@ -1172,6 +1182,14 @@ async def support_chat_id_handler(message: Message) -> None:
         "Добавь в BotHost:\n"
         f"<code>SUPPORT_ADMIN_CHAT_ID={message.chat.id}</code>\n"
         "Затем сделай редеплой."
+    )
+
+
+@router.message(Command("version"))
+async def version_handler(message: Message) -> None:
+    await message.answer(
+        f"Сборка Dietnik: <code>{BOT_RELEASE}</code>\n"
+        f"Чат поддержки: <code>{SUPPORT_ADMIN_CHAT_ID or 'не настроен'}</code>"
     )
 
 
@@ -2687,6 +2705,8 @@ async def photo_handler(message: Message, bot: Bot) -> None:
 
 @router.message()
 async def fallback_handler(message: Message) -> None:
+    if message.chat.type != "private":
+        return
     if message.text and message.text.startswith("/"):
         await message.answer(
             "Я пока не знаю такую команду.\n\n"
@@ -2707,6 +2727,11 @@ async def main() -> None:
 
     validate_config()
     init_db()
+    logger.info(
+        "Starting Dietnik release=%s support_chat_id=%s",
+        BOT_RELEASE,
+        SUPPORT_ADMIN_CHAT_ID,
+    )
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()

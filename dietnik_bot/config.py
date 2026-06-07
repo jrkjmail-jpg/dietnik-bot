@@ -20,6 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
+BOT_RELEASE = os.getenv("BOT_RELEASE", "2026.06.07-support-2")
 
 
 def _get_int_env(name: str, default: int) -> int:

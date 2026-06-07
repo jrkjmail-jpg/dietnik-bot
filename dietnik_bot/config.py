@@ -18,6 +18,7 @@ LEGACY_DB_PATH = BASE_DIR / "dietnik.sqlite3"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
 
 
@@ -30,7 +31,7 @@ def _get_int_env(name: str, default: int) -> int:
 
 
 AUTO_DB_BACKUP_INTERVAL_HOURS = _get_int_env("AUTO_DB_BACKUP_INTERVAL_HOURS", 6)
-PREMIUM_PRICE_XTR = max(1, min(10_000, _get_int_env("PREMIUM_PRICE_XTR", 450)))
+PREMIUM_PRICE_RUB = max(1, _get_int_env("PREMIUM_PRICE_RUB", 890))
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = {
     int(admin_id.strip())

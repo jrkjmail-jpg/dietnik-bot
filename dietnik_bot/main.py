@@ -30,8 +30,9 @@ from config import (
     DATA_DIR,
     DB_PATH,
     OPENAI_API_KEY,
+    PAYMENT_PROVIDER_TOKEN,
     PERSISTENCE_PATH,
-    PREMIUM_PRICE_XTR,
+    PREMIUM_PRICE_RUB,
     SUPPORT_USERNAME,
     validate_config,
 )
@@ -101,7 +102,7 @@ class AdminPanel(StatesGroup):
 
 
 MONTH_DAYS = 30
-PREMIUM_INVOICE_PAYLOAD = "dietnik_premium_30"
+PREMIUM_INVOICE_PAYLOAD = "dietnik_premium_30_rub"
 
 RECIPE_LIBRARY = [
     {
@@ -360,7 +361,7 @@ def _format_subscription(user: dict | None) -> str:
         f"Текущий тариф: {current_plan}{premium_line}\n\n"
         "🌱 Basic — бесплатно\n"
         "Дневник · фото-учёт · AI-анализ еды · дневная цель · рекомендации\n\n"
-        f"🌿 Premium — {PREMIUM_PRICE_XTR} Telegram Stars / 30 дней\n"
+        f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽ / 30 дней\n"
         "Всё из Basic · AI-диетолог · рецепты под остаток КБЖУ · "
         "отчёты за 7, 30 дней и весь период\n\n"
         "Premium делает бота персональным ассистентом, а не просто счётчиком калорий."
@@ -1092,7 +1093,10 @@ async def subscription_handler(message: Message) -> None:
         return
     await message.answer(
         _format_subscription(user),
-        reply_markup=subscription_keyboard(PREMIUM_PRICE_XTR),
+        reply_markup=subscription_keyboard(
+            PREMIUM_PRICE_RUB,
+            bool(PAYMENT_PROVIDER_TOKEN),
+        ),
     )
 
 
@@ -1100,9 +1104,10 @@ async def subscription_handler(message: Message) -> None:
 async def terms_handler(message: Message) -> None:
     await message.answer(
         "📄 Условия Premium\n\n"
-        f"Стоимость: {PREMIUM_PRICE_XTR} Telegram Stars за 30 дней.\n"
+        f"Стоимость: {PREMIUM_PRICE_RUB} ₽ за 30 дней.\n"
         "Premium открывает AI-диетолога, рецепты и расширенные отчёты.\n"
         "После оплаты доступ активируется автоматически.\n\n"
+        "Платёж является разовым и не продлевается автоматически.\n\n"
         "Dietnik помогает вести дневник питания, но не заменяет врача. "
         "Расчёты по фото являются оценкой и зависят от размера порции.\n\n"
         f"Вопросы по оплате: /paysupport или {SUPPORT_USERNAME}",
@@ -1115,7 +1120,7 @@ async def payment_support_handler(message: Message) -> None:
     await message.answer(
         "🛟 Поддержка по оплате\n\n"
         f"Напиши {SUPPORT_USERNAME} и укажи свой Telegram ID: {message.from_user.id}.\n"
-        "Также приложи дату платежа и скриншот квитанции Telegram Stars.",
+        "Также приложи дату платежа и квитанцию ЮKassa.",
         parse_mode=None,
     )
 
@@ -1250,21 +1255,36 @@ async def payment_support_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "payment_unavailable")
+async def payment_unavailable_callback(callback: CallbackQuery) -> None:
+    await callback.message.answer(
+        "Оплата через ЮKassa ещё не подключена на сервере.\n\n"
+        "Администратору нужно добавить PAYMENT_PROVIDER_TOKEN в BotHost и сделать редеплой.",
+        parse_mode=None,
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "buy_premium")
 async def buy_subscription_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if not PAYMENT_PROVIDER_TOKEN:
+        await payment_unavailable_callback(callback)
+        return
+
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
         title="Dietnik Premium на 30 дней",
         description="AI-диетолог, рецепты под остаток КБЖУ и расширенные отчёты.",
         payload=PREMIUM_INVOICE_PAYLOAD,
-        provider_token="",
-        currency="XTR",
+        provider_token=PAYMENT_PROVIDER_TOKEN,
+        currency="RUB",
         prices=[
             LabeledPrice(
                 label="Dietnik Premium на 30 дней",
-                amount=PREMIUM_PRICE_XTR,
+                amount=PREMIUM_PRICE_RUB * 100,
             )
         ],
+        start_parameter="dietnik-premium-30",
     )
     await callback.answer()
 
@@ -1273,8 +1293,8 @@ async def buy_subscription_handler(callback: CallbackQuery, bot: Bot) -> None:
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
     valid = (
         pre_checkout_query.invoice_payload == PREMIUM_INVOICE_PAYLOAD
-        and pre_checkout_query.currency == "XTR"
-        and pre_checkout_query.total_amount == PREMIUM_PRICE_XTR
+        and pre_checkout_query.currency == "RUB"
+        and pre_checkout_query.total_amount == PREMIUM_PRICE_RUB * 100
     )
     if valid:
         await pre_checkout_query.answer(ok=True)
@@ -1290,8 +1310,8 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
     payment = message.successful_payment
     if (
         payment.invoice_payload != PREMIUM_INVOICE_PAYLOAD
-        or payment.currency != "XTR"
-        or payment.total_amount != PREMIUM_PRICE_XTR
+        or payment.currency != "RUB"
+        or payment.total_amount != PREMIUM_PRICE_RUB * 100
     ):
         logger.error(
             "Rejected unexpected successful payment user_id=%s payload=%r currency=%s amount=%s",
@@ -1368,7 +1388,8 @@ async def admin_health_handler(message: Message) -> None:
         "🩺 Диагностика\n\n"
         f"ADMIN_IDS настроены: {'да' if ADMIN_IDS else 'нет'}\n"
         f"OpenAI ключ: {'есть' if OPENAI_API_KEY else 'нет'}\n"
-        f"Оплата: Telegram Stars, {PREMIUM_PRICE_XTR} XTR\n"
+        f"Оплата ЮKassa: {'подключена' if PAYMENT_PROVIDER_TOKEN else 'не подключена'}\n"
+        f"Цена Premium: {PREMIUM_PRICE_RUB} RUB\n"
         f"DATA_DIR: {DATA_DIR}\n"
         f"DB_PATH: {DB_PATH}\n"
         f"PERSISTENCE_PATH: {PERSISTENCE_PATH}\n"

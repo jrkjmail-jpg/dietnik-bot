@@ -50,8 +50,8 @@ class DatabaseTests(unittest.TestCase):
     def test_payment_is_idempotent_and_activates_premium(self) -> None:
         first = database.activate_premium_payment(
             telegram_id=1001,
-            amount=450,
-            currency="XTR",
+            amount=89000,
+            currency="RUB",
             provider_payment_charge_id="provider-1",
             telegram_payment_charge_id="telegram-1",
             invoice_payload="dietnik_premium_30",
@@ -59,8 +59,8 @@ class DatabaseTests(unittest.TestCase):
         )
         second = database.activate_premium_payment(
             telegram_id=1001,
-            amount=450,
-            currency="XTR",
+            amount=89000,
+            currency="RUB",
             provider_payment_charge_id="provider-1",
             telegram_payment_charge_id="telegram-1",
             invoice_payload="dietnik_premium_30",
@@ -71,7 +71,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertFalse(second)
         self.assertEqual(database.get_user(1001)["premium_until"], "2026-07-07")
         self.assertEqual(database.get_admin_stats()["payments_count"], 1)
-        self.assertEqual(database.get_admin_stats()["payment_totals"], {"XTR": 450})
+        self.assertEqual(database.get_admin_stats()["payment_totals"], {"RUB": 89000})
 
 
 if __name__ == "__main__":

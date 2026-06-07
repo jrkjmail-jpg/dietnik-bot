@@ -55,15 +55,24 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def subscription_keyboard(premium_price_xtr: int) -> InlineKeyboardMarkup:
+def subscription_keyboard(
+    premium_price_rub: int,
+    payments_enabled: bool,
+) -> InlineKeyboardMarkup:
+    payment_button = (
+        InlineKeyboardButton(
+            text=f"💳 Купить Premium — {premium_price_rub} ₽",
+            callback_data="buy_premium",
+        )
+        if payments_enabled
+        else InlineKeyboardButton(
+            text="Оплата настраивается",
+            callback_data="payment_unavailable",
+        )
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"⭐ Купить Premium — {premium_price_xtr} Stars",
-                    callback_data="buy_premium",
-                )
-            ],
+            [payment_button],
             [
                 InlineKeyboardButton(text="Условия", callback_data="payment_terms"),
                 InlineKeyboardButton(text="Поддержка", callback_data="payment_support"),

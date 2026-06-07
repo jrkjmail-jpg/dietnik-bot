@@ -34,6 +34,10 @@ from config import (
     PAYMENT_PROVIDER_TOKEN,
     PERSISTENCE_PATH,
     PREMIUM_PRICE_RUB,
+    SUPPORT_ADMIN_CHAT_ID,
+    SUPPORT_AI_ENABLED,
+    SUPPORT_ATTACHMENT_MAX_FILE_BYTES,
+    SUPPORT_MESSAGE_MAX_CHARS,
     SUPPORT_USERNAME,
     validate_config,
 )
@@ -46,16 +50,23 @@ from database import (
     get_recent_payments,
     get_recent_meals,
     get_storage_probe_status,
+    get_support_status,
+    get_support_user_by_admin_message,
     get_today_stats,
     get_user,
     get_user_meals,
     get_users_page,
     get_period_stats,
     init_db,
+    ensure_support_thread,
+    get_recent_support_messages,
+    log_support_message,
     mark_trial_used,
+    remember_support_admin_message,
     reset_today,
     restore_database_file,
     set_app_state,
+    set_support_status,
     save_meal,
     save_user,
     set_subscription,
@@ -68,10 +79,11 @@ from keyboards import (
     remove_keyboard,
     reports_keyboard,
     subscription_keyboard,
+    support_keyboard,
     trial_keyboard,
 )
 from nutrition import calculate_norm, calculate_remaining
-from openai_service import analyze_food_photo, ask_dietitian
+from openai_service import analyze_food_photo, ask_dietitian, ask_support_ai
 
 
 router = Router()
@@ -89,6 +101,10 @@ class Onboarding(StatesGroup):
 
 class Consultation(StatesGroup):
     question = State()
+
+
+class SupportChat(StatesGroup):
+    active = State()
 
 
 class ManualMeal(StatesGroup):
@@ -232,6 +248,7 @@ HELP_TEXT = """
 💡 Рекомендации — что улучшить сегодня
 🤖 Диетолог — вопрос AI-диетологу
 💳 Подписка — тарифы Basic и Premium
+💬 Поддержка — задать вопрос AI или администратору
 
 Важно:
 Оценка по фото может отличаться от реальности. Для максимальной точности используй весы и проверяй порции.
@@ -628,6 +645,248 @@ def _premium_required_text() -> str:
     )
 
 
+def _support_needs_admin_by_keywords(text: str) -> bool:
+    lowered = text.casefold()
+    keywords = {
+        "оплатил",
+        "оплатила",
+        "деньги списали",
+        "списались деньги",
+        "не активировалась",
+        "не активировался",
+        "возврат",
+        "вернуть деньги",
+        "чек",
+        "ошибка оплаты",
+        "не работает оплата",
+        "удалить мои данные",
+        "удалить аккаунт",
+        "администратор",
+        "оператор",
+        "живой человек",
+        "позовите человека",
+    }
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _format_support_admin_text(
+    message: Message,
+    user: dict | None,
+    support_text: str,
+    reason: str,
+    ai_answer: str | None = None,
+) -> str:
+    username = f"@{message.from_user.username}" if message.from_user.username else "без username"
+    plan = _subscription_name(user) if user else "анкета не завершена"
+    text = (
+        "💬 Обращение в поддержку Dietnik\n\n"
+        f"Пользователь: {message.from_user.id} ({username})\n"
+        f"Тариф: {plan}\n"
+        f"Причина передачи: {reason or 'нужна проверка администратора'}\n\n"
+        f"Сообщение пользователя:\n{support_text}\n\n"
+    )
+    if ai_answer:
+        text += f"Ответ AI пользователю:\n{ai_answer}\n\n"
+    return (
+        text
+        + "Как ответить:\n"
+        "1. Нажми «Ответить» на это сообщение и напиши текст.\n"
+        f"2. Или используй: /reply {message.from_user.id} текст ответа"
+    )
+
+
+async def _notify_support_admins(
+    bot: Bot,
+    message: Message,
+    support_text: str,
+    reason: str,
+    ai_answer: str | None = None,
+) -> bool:
+    user = get_user(message.from_user.id)
+    admin_text = _format_support_admin_text(
+        message,
+        user,
+        support_text,
+        reason,
+        ai_answer,
+    )
+    recipients = (
+        [SUPPORT_ADMIN_CHAT_ID]
+        if SUPPORT_ADMIN_CHAT_ID
+        else sorted(ADMIN_IDS)
+    )
+    sent_any = False
+    for chat_id in recipients:
+        try:
+            sent = await bot.send_message(chat_id, admin_text, parse_mode=None)
+            remember_support_admin_message(
+                sent.chat.id,
+                sent.message_id,
+                message.from_user.id,
+            )
+            sent_any = True
+        except Exception as exc:
+            logger.warning("Support escalation failed for chat_id=%s: %s", chat_id, exc)
+    return sent_any
+
+
+async def _send_support_reply(
+    bot: Bot,
+    telegram_id: int,
+    text: str,
+) -> bool:
+    try:
+        await bot.send_message(
+            telegram_id,
+            f"💬 Ответ поддержки\n\n{text}",
+            reply_markup=support_keyboard(),
+            parse_mode=None,
+        )
+        log_support_message(telegram_id, "admin", text)
+        set_support_status(telegram_id, "admin")
+        return True
+    except Exception as exc:
+        logger.warning("Support reply failed for user_id=%s: %s", telegram_id, exc)
+        return False
+
+
+async def _begin_support(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    first_message: str | None = None,
+) -> None:
+    await state.clear()
+    await state.set_state(SupportChat.active)
+    ensure_support_thread(message.from_user.id)
+    if first_message:
+        await _process_support_text(message, state, bot, first_message)
+        return
+    await message.answer(
+        "💬 Поддержка Dietnik\n\n"
+        "Опиши проблему одним сообщением. Сначала попробую помочь я. "
+        "Если потребуется проверить оплату, базу или логи, я передам обращение администратору.\n\n"
+        "Можно также отправить скриншот или PDF-чек.",
+        reply_markup=support_keyboard(),
+        parse_mode=None,
+    )
+
+
+async def _process_support_text(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    support_text: str,
+) -> None:
+    support_text = support_text.strip()
+    if not support_text:
+        await message.answer(
+            "Напиши вопрос текстом, и я постараюсь помочь.",
+            reply_markup=support_keyboard(),
+        )
+        return
+    if len(support_text) > SUPPORT_MESSAGE_MAX_CHARS:
+        await message.answer(
+            f"Сообщение слишком длинное. Сократи его до {SUPPORT_MESSAGE_MAX_CHARS} символов "
+            "или приложи скриншот.",
+            reply_markup=support_keyboard(),
+        )
+        return
+
+    user_id = message.from_user.id
+    existing_status = get_support_status(user_id)
+    log_support_message(user_id, "user", support_text)
+    if existing_status == "admin":
+        sent = await _notify_support_admins(
+            bot,
+            message,
+            support_text,
+            "дополнение к открытому обращению",
+        )
+        await message.answer(
+            "Добавил сообщение к обращению. Администратор увидит его и ответит здесь."
+            if sent
+            else f"Не получилось передать дополнение. Напиши {SUPPORT_USERNAME}.",
+            reply_markup=support_keyboard(),
+            parse_mode=None,
+        )
+        return
+
+    keyword_escalation = _support_needs_admin_by_keywords(support_text)
+
+    if not SUPPORT_AI_ENABLED:
+        set_support_status(user_id, "admin")
+        sent = await _notify_support_admins(
+            bot,
+            message,
+            support_text,
+            "AI-поддержка отключена",
+        )
+        await message.answer(
+            "Передал вопрос администратору. Он ответит здесь в чате."
+            if sent
+            else f"Не получилось передать обращение автоматически. Напиши {SUPPORT_USERNAME}.",
+            reply_markup=support_keyboard(),
+            parse_mode=None,
+        )
+        return
+
+    try:
+        result = await ask_support_ai(
+            support_text,
+            get_user(user_id),
+            get_recent_support_messages(user_id),
+            keyword_escalation,
+        )
+    except Exception as exc:
+        logger.exception("Support AI failed for user_id=%s", user_id)
+        set_support_status(user_id, "admin")
+        sent = await _notify_support_admins(
+            bot,
+            message,
+            support_text,
+            f"ошибка AI: {exc}",
+        )
+        await message.answer(
+            "Я не смог уверенно ответить автоматически, поэтому передал вопрос администратору."
+            if sent
+            else f"AI-поддержка временно недоступна. Напиши {SUPPORT_USERNAME}.",
+            reply_markup=support_keyboard(),
+            parse_mode=None,
+        )
+        return
+
+    answer = result["answer"]
+    log_support_message(user_id, "ai", answer)
+    await message.answer(answer, reply_markup=support_keyboard(), parse_mode=None)
+
+    if result["escalate"]:
+        set_support_status(user_id, "admin")
+        sent = await _notify_support_admins(
+            bot,
+            message,
+            support_text,
+            result["reason"],
+            ai_answer=answer,
+        )
+        await message.answer(
+            "Я передал вопрос администратору. Он проверит детали и ответит здесь."
+            if sent
+            else f"Для ручной проверки напиши {SUPPORT_USERNAME}.",
+            reply_markup=support_keyboard(),
+            parse_mode=None,
+        )
+    else:
+        set_support_status(user_id, "ai")
+
+
+def _is_support_admin_chat(message: Message) -> bool:
+    return bool(
+        SUPPORT_ADMIN_CHAT_ID
+        and message.chat.id == SUPPORT_ADMIN_CHAT_ID
+    )
+
+
 def _is_admin(message: Message | CallbackQuery) -> bool:
     user = message.from_user
     return bool(user and user.id in ADMIN_IDS)
@@ -670,7 +929,9 @@ def _admin_help_text() -> str:
         "/admin_message <telegram_id> <текст> — написать пользователю\n"
         "/admin_broadcast — рассылка всем пользователям\n"
         "/admin_cancel — отменить админ-действие\n"
-        "/admin_health — диагностика конфига и БД\n\n"
+        "/admin_health — диагностика конфига и БД\n"
+        "/reply <telegram_id> <текст> — ответить от имени поддержки\n"
+        "/supportchatid — показать ID группы поддержки\n\n"
         "Хранилище:\n"
         "/dbstatus — статус постоянной базы\n"
         "/storagecheck — проверка сохранности /app/data\n"
@@ -693,6 +954,7 @@ def _commands_text(is_admin: bool = False) -> str:
         "/subscription — тарифы и подписка\n"
         "/terms — условия подписки\n"
         "/paysupport — помощь с оплатой\n"
+        "/support — открыть поддержку\n"
         "/help — как пользоваться\n"
         "/commands — список команд\n\n"
         "Premium:\n"
@@ -722,6 +984,8 @@ def _commands_text(is_admin: bool = False) -> str:
             "/admin_broadcast — рассылка всем пользователям\n"
             "/admin_cancel — отменить админ-действие\n"
             "/admin_health — диагностика\n"
+            "/reply <telegram_id> <текст> — ответить пользователю\n"
+            "/supportchatid — ID группы поддержки\n"
             "/dbstatus — статус постоянной базы\n"
             "/storagecheck — проверка /app/data\n"
             "/backupdb — скачать SQLite-базу\n"
@@ -895,6 +1159,196 @@ async def storage_admin_router(message: Message, state: FSMContext, bot: Bot) ->
         await backupdb_handler(message, bot)
     elif command == "restoredb":
         await restoredb_handler(message, state)
+
+
+@router.message(Command("supportchatid"))
+async def support_chat_id_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+    await message.answer(
+        "💬 ID этого чата для поддержки:\n"
+        f"<code>{message.chat.id}</code>\n\n"
+        "Добавь в BotHost:\n"
+        f"<code>SUPPORT_ADMIN_CHAT_ID={message.chat.id}</code>\n"
+        "Затем сделай редеплой."
+    )
+
+
+@router.message(Command("reply"))
+async def support_reply_command_handler(message: Message, bot: Bot) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+    args = _command_args(message).split(maxsplit=1)
+    telegram_id = _parse_user_id(args[0]) if args else None
+    reply_text = args[1].strip() if len(args) > 1 else ""
+    if not telegram_id or not reply_text:
+        await message.answer(
+            "Формат: /reply <telegram_id> <текст ответа>",
+            parse_mode=None,
+        )
+        return
+    sent = await _send_support_reply(bot, telegram_id, reply_text)
+    await message.answer(
+        "✅ Ответ отправлен пользователю."
+        if sent
+        else "⚠️ Не получилось отправить ответ пользователю."
+    )
+
+
+@router.message(
+    lambda message: (
+        _is_support_admin_chat(message)
+        and not (message.text or "").startswith("/")
+    )
+)
+async def support_group_reply_handler(message: Message, bot: Bot) -> None:
+    if not _is_admin(message):
+        return
+    if not message.reply_to_message:
+        await message.answer(
+            "Нажми «Ответить» именно на обращение пользователя "
+            "или используй /reply user_id текст.",
+            parse_mode=None,
+        )
+        return
+    telegram_id = get_support_user_by_admin_message(
+        message.chat.id,
+        message.reply_to_message.message_id,
+    )
+    if not telegram_id:
+        await message.answer(
+            "Не нашёл пользователя для этого сообщения. "
+            "Ответь на исходное обращение или используй /reply.",
+            parse_mode=None,
+        )
+        return
+    reply_text = (message.text or "").strip()
+    if not reply_text:
+        await message.answer("Пока поддерживаются текстовые ответы администратора.")
+        return
+    sent = await _send_support_reply(bot, telegram_id, reply_text)
+    await message.answer(
+        "✅ Ответ отправлен пользователю."
+        if sent
+        else "⚠️ Не получилось отправить ответ."
+    )
+
+
+@router.message(Command("support"))
+async def support_handler(message: Message, state: FSMContext, bot: Bot) -> None:
+    await _begin_support(
+        message,
+        state,
+        bot,
+        first_message=_command_args(message) or None,
+    )
+
+
+@router.message(
+    SupportChat.active,
+    F.text.in_({"✅ Завершить поддержку", "Завершить поддержку"}),
+)
+async def close_support_handler(message: Message, state: FSMContext) -> None:
+    set_support_status(message.from_user.id, "closed")
+    await state.clear()
+    await message.answer(
+        "✅ Диалог с поддержкой завершён. Если понадобится помощь, нажми «💬 Поддержка».",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(SupportChat.active, Command("close_support"))
+async def close_support_command_handler(message: Message, state: FSMContext) -> None:
+    await close_support_handler(message, state)
+
+
+@router.message(SupportChat.active, F.photo | F.document)
+async def support_attachment_handler(message: Message, bot: Bot) -> None:
+    file_size = 0
+    allowed = False
+    attachment_name = "скриншот"
+    if message.photo:
+        file_size = message.photo[-1].file_size or 0
+        allowed = True
+    elif message.document:
+        file_size = message.document.file_size or 0
+        file_name = (message.document.file_name or "").casefold()
+        mime_type = (message.document.mime_type or "").casefold()
+        allowed = (
+            mime_type.startswith(("image/", "text/"))
+            or mime_type == "application/pdf"
+            or file_name.endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp", ".txt"))
+        )
+        attachment_name = message.document.file_name or "документ"
+
+    if not allowed:
+        await message.answer(
+            "Можно отправить фото, скриншот, PDF-чек или текстовый файл.",
+            reply_markup=support_keyboard(),
+        )
+        return
+    if file_size > SUPPORT_ATTACHMENT_MAX_FILE_BYTES:
+        max_mb = round(SUPPORT_ATTACHMENT_MAX_FILE_BYTES / 1024 / 1024)
+        await message.answer(
+            f"Файл слишком большой. Максимальный размер: {max_mb} МБ.",
+            reply_markup=support_keyboard(),
+        )
+        return
+
+    note = f"[вложение: {attachment_name}] {(message.caption or '').strip()}".strip()
+    log_support_message(message.from_user.id, "user", note)
+    set_support_status(message.from_user.id, "admin")
+
+    recipients = [SUPPORT_ADMIN_CHAT_ID] if SUPPORT_ADMIN_CHAT_ID else sorted(ADMIN_IDS)
+    sent_any = False
+    for chat_id in recipients:
+        try:
+            forwarded = await bot.forward_message(
+                chat_id,
+                message.chat.id,
+                message.message_id,
+            )
+            remember_support_admin_message(
+                forwarded.chat.id,
+                forwarded.message_id,
+                message.from_user.id,
+            )
+            info = await bot.send_message(
+                chat_id,
+                "📎 Вложение в поддержку Dietnik\n\n"
+                f"Пользователь: {message.from_user.id}"
+                f"{' (@' + message.from_user.username + ')' if message.from_user.username else ''}\n"
+                f"Комментарий: {message.caption or 'без подписи'}\n\n"
+                "Ответь reply на это сообщение или на вложение.",
+                parse_mode=None,
+            )
+            remember_support_admin_message(
+                info.chat.id,
+                info.message_id,
+                message.from_user.id,
+            )
+            sent_any = True
+        except Exception as exc:
+            logger.warning("Support attachment forwarding failed: %s", exc)
+
+    await message.answer(
+        "Скриншот передан администратору. Он ответит здесь."
+        if sent_any
+        else f"Не получилось передать файл автоматически. Напиши {SUPPORT_USERNAME}.",
+        reply_markup=support_keyboard(),
+        parse_mode=None,
+    )
+
+
+@router.message(SupportChat.active, F.text & ~F.text.startswith("/"))
+async def support_text_handler(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    await _process_support_text(message, state, bot, message.text or "")
 
 
 @router.message(Command("start"))
@@ -1244,11 +1698,16 @@ async def terms_handler(message: Message) -> None:
 
 
 @router.message(Command("paysupport"))
-async def payment_support_handler(message: Message) -> None:
+async def payment_support_handler(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    await _begin_support(message, state, bot)
     await message.answer(
-        "🛟 Поддержка по оплате\n\n"
-        f"Напиши {SUPPORT_USERNAME} и укажи свой Telegram ID: {message.from_user.id}.\n"
-        "Также приложи дату платежа и квитанцию ЮKassa.",
+        "Если вопрос об оплате, напиши дату, сумму и что именно произошло. "
+        "При необходимости приложи квитанцию ЮKassa.",
+        reply_markup=support_keyboard(),
         parse_mode=None,
     )
 
@@ -1379,10 +1838,18 @@ async def payment_terms_callback(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "payment_support")
-async def payment_support_callback(callback: CallbackQuery) -> None:
+async def payment_support_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await state.set_state(SupportChat.active)
+    ensure_support_thread(callback.from_user.id)
     await callback.message.answer(
-        f"🛟 Поддержка по оплате: {SUPPORT_USERNAME}\n"
-        f"Твой Telegram ID: {callback.from_user.id}",
+        "💬 Поддержка Dietnik\n\n"
+        "Опиши, что произошло с оплатой. Укажи дату и сумму. "
+        "Можно приложить скриншот или PDF-квитанцию.",
+        reply_markup=support_keyboard(),
         parse_mode=None,
     )
     await callback.answer()
@@ -1585,10 +2052,14 @@ async def admin_health_handler(message: Message) -> None:
         f"Оплата ЮKassa: {'подключена' if PAYMENT_PROVIDER_TOKEN else 'не подключена'}\n"
         f"Цена Basic: {BASIC_PRICE_RUB} RUB\n"
         f"Цена Premium: {PREMIUM_PRICE_RUB} RUB\n"
+        f"AI-поддержка: {'включена' if SUPPORT_AI_ENABLED else 'выключена'}\n"
+        f"Чат поддержки: {SUPPORT_ADMIN_CHAT_ID or 'не задан'}\n"
         f"DATA_DIR: {DATA_DIR}\n"
         f"DB_PATH: {DB_PATH}\n"
         f"PERSISTENCE_PATH: {PERSISTENCE_PATH}\n"
         f"Пользователей в БД: {stats['users_count']}\n"
+        f"Открытых обращений: {stats['open_support_threads']}\n"
+        f"Ждут администратора: {stats['escalated_support_threads']}\n"
         f"Приёмов пищи в БД: {stats['meals_count']}"
     )
 
@@ -1613,6 +2084,8 @@ async def dbstatus_handler(message: Message) -> None:
         f"Пробный режим: {status['trial_users']}\n"
         f"Basic пользователей: {status['basic_users']}\n"
         f"Premium пользователей: {status['premium_users']}\n"
+        f"Открытых обращений: {status['open_support_threads']}\n"
+        f"Ждут администратора: {status['escalated_support_threads']}\n"
         f"База лежит в /app/data: {'да' if status['in_app_data'] else 'нет'}\n"
         f"База лежит в DATA_DIR: {'да' if status['in_data_dir'] else 'нет'}\n"
         f"DB_PATH задан явно: {'да' if status['db_path_explicit'] else 'нет'}\n"
@@ -1692,6 +2165,8 @@ async def admin_stats_handler(message: Message) -> None:
         f"Пробный режим: {stats['trial_users']}\n"
         f"Basic: {stats['basic_users']}\n"
         f"Premium: {stats['premium_users']}\n"
+        f"Открытых обращений: {stats['open_support_threads']}\n"
+        f"Ждут администратора: {stats['escalated_support_threads']}\n"
         f"Активны сегодня: {stats['active_today']}\n"
         f"Приёмов пищи сегодня: {stats['meals_today']}\n"
         f"Приёмов пищи всего: {stats['meals_count']}\n"
@@ -2082,10 +2557,15 @@ async def plain_my_id_handler(message: Message) -> None:
             "💳 Подписка",
             "🍳 Рецепты",
             "📈 Отчёты",
+            "💬 Поддержка",
         }
     )
 )
-async def menu_button_handler(message: Message, state: FSMContext) -> None:
+async def menu_button_handler(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
     if message.text == "🍽 Добавить еду":
         user = get_user(message.from_user.id)
         if not await _require_subscription(message, user):
@@ -2109,6 +2589,8 @@ async def menu_button_handler(message: Message, state: FSMContext) -> None:
         await recipes_handler(message)
     elif message.text == "📈 Отчёты":
         await reports_handler(message)
+    elif message.text == "💬 Поддержка":
+        await _begin_support(message, state, bot)
 
 
 @router.message(F.photo)

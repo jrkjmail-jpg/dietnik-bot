@@ -126,6 +126,39 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS support_threads (
+                telegram_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'ai',
+                last_message_at TEXT,
+                escalated_at TEXT,
+                closed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                sender TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS support_admin_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+            """
+        )
         _ensure_column(conn, "subscriptions", "invoice_payload", "TEXT")
         _ensure_column(conn, "subscriptions", "subscription_expires_at", "TEXT")
         _ensure_column(conn, "subscriptions", "is_recurring", "INTEGER DEFAULT 0")
@@ -188,6 +221,139 @@ def set_app_state(key: str, value: str) -> None:
             """,
             (key, value, _now()),
         )
+
+
+def ensure_support_thread(telegram_id: int, status: str = "ai") -> None:
+    """Create or reopen a support thread for a registered user."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO support_threads (
+                telegram_id, status, last_message_at, closed_at
+            )
+            VALUES (?, ?, ?, NULL)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                last_message_at = excluded.last_message_at,
+                closed_at = NULL
+            """,
+            (telegram_id, status, _now()),
+        )
+
+
+def log_support_message(telegram_id: int, sender: str, message: str) -> None:
+    """Persist one user, AI or admin support message."""
+    ensure_support_thread(telegram_id)
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO support_messages (
+                telegram_id, sender, message, created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (telegram_id, sender, message, _now()),
+        )
+        conn.execute(
+            """
+            UPDATE support_threads
+            SET last_message_at = ?
+            WHERE telegram_id = ?
+            """,
+            (_now(), telegram_id),
+        )
+
+
+def set_support_status(telegram_id: int, status: str) -> None:
+    """Update support ownership: ai, admin or closed."""
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO support_threads (
+                telegram_id, status, last_message_at, escalated_at, closed_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                status = excluded.status,
+                last_message_at = excluded.last_message_at,
+                escalated_at = CASE
+                    WHEN excluded.status = 'admin' THEN excluded.last_message_at
+                    ELSE support_threads.escalated_at
+                END,
+                closed_at = CASE
+                    WHEN excluded.status = 'closed' THEN excluded.last_message_at
+                    ELSE NULL
+                END
+            """,
+            (
+                telegram_id,
+                status,
+                now,
+                now if status == "admin" else None,
+                now if status == "closed" else None,
+            ),
+        )
+
+
+def get_support_status(telegram_id: int) -> Optional[str]:
+    """Return current support owner/status."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM support_threads WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+    return str(row["status"]) if row else None
+
+
+def get_recent_support_messages(telegram_id: int, limit: int = 8) -> list[dict]:
+    """Return recent support history in chronological order."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT sender, message
+            FROM support_messages
+            WHERE telegram_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (telegram_id, limit),
+        ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+
+
+def remember_support_admin_message(
+    chat_id: int,
+    message_id: int,
+    telegram_id: int,
+) -> None:
+    """Map an admin-chat message to the user whose ticket it represents."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO support_admin_messages (
+                chat_id, message_id, telegram_id, created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (chat_id, message_id, telegram_id, _now()),
+        )
+
+
+def get_support_user_by_admin_message(
+    chat_id: int,
+    message_id: int,
+) -> Optional[int]:
+    """Resolve a reply in the support group to its Telegram user."""
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT telegram_id
+            FROM support_admin_messages
+            WHERE chat_id = ? AND message_id = ?
+            """,
+            (chat_id, message_id),
+        ).fetchone()
+    return int(row["telegram_id"]) if row else None
 
 
 def save_user(
@@ -464,6 +630,20 @@ def get_admin_stats() -> dict:
             ORDER BY currency
             """
         ).fetchall()
+        open_support_threads = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM support_threads
+            WHERE status IN ('ai', 'admin')
+            """
+        ).fetchone()["count"]
+        escalated_support_threads = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM support_threads
+            WHERE status = 'admin'
+            """
+        ).fetchone()["count"]
 
     return {
         "users_count": int(users_count),
@@ -473,6 +653,8 @@ def get_admin_stats() -> dict:
         "premium_users": int(premium_users),
         "basic_users": int(basic_users),
         "trial_users": int(trial_users),
+        "open_support_threads": int(open_support_threads),
+        "escalated_support_threads": int(escalated_support_threads),
         "payments_count": int(payments["count"]),
         "payments_amount": int(payments["amount"]),
         "payment_totals": {
@@ -504,6 +686,8 @@ def get_db_status() -> dict:
         "premium_users": stats["premium_users"],
         "basic_users": stats["basic_users"],
         "trial_users": stats["trial_users"],
+        "open_support_threads": stats["open_support_threads"],
+        "escalated_support_threads": stats["escalated_support_threads"],
         "in_app_data": str(db_resolved).startswith("/app/data"),
         "in_data_dir": in_data_dir,
         "db_path_explicit": DB_PATH_EXPLICIT,

@@ -108,6 +108,30 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(user["subscription_until"], "2026-07-07")
         self.assertEqual(user["premium_until"], "2026-07-07")
 
+    def test_support_history_status_and_admin_mapping(self) -> None:
+        database.ensure_support_thread(1001)
+        database.log_support_message(1001, "user", "Не активировалась подписка")
+        database.log_support_message(1001, "ai", "Передаю вопрос администратору")
+        database.set_support_status(1001, "admin")
+        database.remember_support_admin_message(-100500, 77, 1001)
+
+        history = database.get_recent_support_messages(1001)
+        self.assertEqual(
+            history,
+            [
+                {"sender": "user", "message": "Не активировалась подписка"},
+                {"sender": "ai", "message": "Передаю вопрос администратору"},
+            ],
+        )
+        self.assertEqual(database.get_support_status(1001), "admin")
+        self.assertEqual(
+            database.get_support_user_by_admin_message(-100500, 77),
+            1001,
+        )
+        stats = database.get_admin_stats()
+        self.assertEqual(stats["open_support_threads"], 1)
+        self.assertEqual(stats["escalated_support_threads"], 1)
+
 
 class LegacyMigrationTests(unittest.TestCase):
     def test_existing_user_keeps_legacy_basic_access_marker(self) -> None:

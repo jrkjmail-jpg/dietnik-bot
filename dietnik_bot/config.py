@@ -30,9 +30,29 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
+def _get_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().casefold() in {"1", "true", "yes", "да", "on"}
+
+
 AUTO_DB_BACKUP_INTERVAL_HOURS = _get_int_env("AUTO_DB_BACKUP_INTERVAL_HOURS", 6)
 BASIC_PRICE_RUB = max(1, _get_int_env("BASIC_PRICE_RUB", 490))
 PREMIUM_PRICE_RUB = max(1, _get_int_env("PREMIUM_PRICE_RUB", 890))
+SUPPORT_AI_ENABLED = _get_bool_env("SUPPORT_AI_ENABLED", True)
+SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-4o-mini")
+SUPPORT_MESSAGE_MAX_CHARS = max(200, _get_int_env("SUPPORT_MESSAGE_MAX_CHARS", 1500))
+SUPPORT_ATTACHMENT_MAX_FILE_BYTES = max(
+    1024,
+    _get_int_env("SUPPORT_ATTACHMENT_MAX_FILE_BYTES", 10 * 1024 * 1024),
+)
+SUPPORT_ADMIN_CHAT_ID_RAW = os.getenv("SUPPORT_ADMIN_CHAT_ID", "").strip()
+SUPPORT_ADMIN_CHAT_ID = (
+    int(SUPPORT_ADMIN_CHAT_ID_RAW)
+    if SUPPORT_ADMIN_CHAT_ID_RAW.lstrip("-").isdigit()
+    else None
+)
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = {
     int(admin_id.strip())

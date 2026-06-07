@@ -50,7 +50,15 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💡 Рекомендации"), KeyboardButton(text="🤖 Диетолог")],
             [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="💳 Подписка")],
             [KeyboardButton(text="🍳 Рецепты"), KeyboardButton(text="📈 Отчёты")],
+            [KeyboardButton(text="💬 Поддержка")],
         ],
+        resize_keyboard=True,
+    )
+
+
+def support_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="✅ Завершить поддержку")]],
         resize_keyboard=True,
     )
 

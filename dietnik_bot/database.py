@@ -3,9 +3,10 @@
 import secrets
 import shutil
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from config import DATA_DIR, DB_PATH, DB_PATH_EXPLICIT, LEGACY_DB_PATH
 
@@ -13,10 +14,18 @@ from config import DATA_DIR, DB_PATH, DB_PATH_EXPLICIT, LEGACY_DB_PATH
 STORAGE_PROBE_PATH = DATA_DIR / "storage_probe.txt"
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(Path(DB_PATH))
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _now() -> str:
@@ -137,7 +146,8 @@ def init_db() -> None:
                 customer_email TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'created',
                 created_at TEXT NOT NULL,
-                paid_at TEXT
+                paid_at TEXT,
+                error_message TEXT
             )
             """
         )
@@ -178,6 +188,7 @@ def init_db() -> None:
         _ensure_column(conn, "subscriptions", "subscription_expires_at", "TEXT")
         _ensure_column(conn, "subscriptions", "is_recurring", "INTEGER DEFAULT 0")
         _ensure_column(conn, "subscriptions", "customer_email", "TEXT")
+        _ensure_column(conn, "payment_intents", "error_message", "TEXT")
         conn.execute(
             """
             DELETE FROM subscriptions
@@ -475,6 +486,36 @@ def get_payment_intent(payload: str) -> Optional[dict]:
             (payload,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def mark_payment_intent_failed(payload: str, error_message: str) -> None:
+    """Store a sanitized provider error for payment diagnostics."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE payment_intents
+            SET status = 'failed', error_message = ?
+            WHERE payload = ?
+            """,
+            (error_message[:1000], payload),
+        )
+
+
+def get_recent_payment_intents(limit: int = 5) -> list[dict]:
+    """Return recent invoice creation attempts for admin diagnostics."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                payload, telegram_id, plan, amount, currency,
+                status, error_message, created_at, paid_at
+            FROM payment_intents
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def mark_trial_used(telegram_id: int) -> bool:

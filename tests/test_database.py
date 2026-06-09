@@ -69,6 +69,24 @@ class DatabaseTests(unittest.TestCase):
             currency="RUB",
             customer_email="user@example.com",
         )
+        database.mark_payment_intent_failed(
+            "dietnik:basic:30:1001:test",
+            "TelegramBadRequest: PAYMENT_PROVIDER_INVALID",
+        )
+        failed_intent = database.get_payment_intent(
+            "dietnik:basic:30:1001:test"
+        )
+        self.assertEqual(failed_intent["status"], "failed")
+        self.assertIn("PAYMENT_PROVIDER_INVALID", failed_intent["error_message"])
+
+        database.save_payment_intent(
+            payload="dietnik:basic:30:1001:paid",
+            telegram_id=1001,
+            plan="basic",
+            amount=49000,
+            currency="RUB",
+            customer_email="user@example.com",
+        )
         first = database.activate_subscription_payment(
             telegram_id=1001,
             plan="basic",
@@ -76,7 +94,7 @@ class DatabaseTests(unittest.TestCase):
             currency="RUB",
             provider_payment_charge_id="provider-1",
             telegram_payment_charge_id="telegram-1",
-            invoice_payload="dietnik:basic:30:1001:test",
+            invoice_payload="dietnik:basic:30:1001:paid",
             subscription_until="2026-07-07",
             customer_email="user@example.com",
         )
@@ -87,7 +105,7 @@ class DatabaseTests(unittest.TestCase):
             currency="RUB",
             provider_payment_charge_id="provider-1",
             telegram_payment_charge_id="telegram-1",
-            invoice_payload="dietnik:basic:30:1001:test",
+            invoice_payload="dietnik:basic:30:1001:paid",
             subscription_until="2026-08-06",
             customer_email="user@example.com",
         )
@@ -99,9 +117,14 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(database.get_user(1001)["premium_until"])
         self.assertEqual(database.get_admin_stats()["payments_count"], 1)
         self.assertEqual(database.get_admin_stats()["payment_totals"], {"RUB": 49000})
-        intent = database.get_payment_intent("dietnik:basic:30:1001:test")
+        intent = database.get_payment_intent("dietnik:basic:30:1001:paid")
         self.assertEqual(intent["status"], "paid")
         self.assertEqual(intent["customer_email"], "user@example.com")
+        attempts = database.get_recent_payment_intents()
+        self.assertEqual(
+            {attempt["status"] for attempt in attempts},
+            {"failed", "paid"},
+        )
 
         with sqlite3.connect(database.DB_PATH) as conn:
             email = conn.execute(

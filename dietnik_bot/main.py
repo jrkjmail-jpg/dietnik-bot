@@ -53,6 +53,7 @@ from database import (
     get_app_state,
     get_db_status,
     get_recent_payments,
+    get_recent_payment_intents,
     get_recent_meals,
     get_storage_probe_status,
     get_support_status,
@@ -67,6 +68,7 @@ from database import (
     ensure_support_thread,
     get_recent_support_messages,
     log_support_message,
+    mark_payment_intent_failed,
     mark_trial_used,
     remember_support_admin_message,
     reset_today,
@@ -495,6 +497,51 @@ def _payment_details(payload: str) -> tuple[str, dict, dict | None] | None:
         if offer["payload"] == payload:
             return plan, offer, None
     return None
+
+
+def _payment_error_hint(error_text: str) -> str:
+    normalized = error_text.casefold()
+    if "payment_provider_invalid" in normalized:
+        return (
+            "Платёжный токен ЮKassa недействителен. Переподключи ЮKassa в "
+            "@BotFather и замени PAYMENT_PROVIDER_TOKEN в BotHost."
+        )
+    if "currency_total_amount_invalid" in normalized:
+        return "Telegram отклонил валюту или сумму счёта."
+    if "digital goods" in normalized or "stars" in normalized or "xtr" in normalized:
+        return (
+            "Telegram отклонил оплату цифровой подписки в рублях. "
+            "Для цифровых функций Telegram требует оплату в Stars."
+        )
+    return (
+        "Telegram или ЮKassa отклонили создание счёта. Проверь платёжный токен, "
+        "подключение магазина и настройки чеков."
+    )
+
+
+async def _notify_payment_error(
+    bot: Bot,
+    telegram_id: int,
+    plan: str,
+    error_text: str,
+) -> None:
+    text = (
+        "⚠️ Ошибка выставления счёта Dietnik\n\n"
+        f"Пользователь: {telegram_id}\n"
+        f"Тариф: {plan}\n"
+        f"Ошибка: {error_text[:700]}\n\n"
+        f"Подсказка: {_payment_error_hint(error_text)}"
+    )
+    recipients = [SUPPORT_ADMIN_CHAT_ID] if SUPPORT_ADMIN_CHAT_ID else sorted(ADMIN_IDS)
+    for chat_id in recipients:
+        try:
+            await bot.send_message(chat_id, text, parse_mode=None)
+        except Exception as exc:
+            logger.warning(
+                "Could not deliver payment diagnostic chat_id=%s: %s",
+                chat_id,
+                exc,
+            )
 
 
 def _locked_text(user: dict) -> str:
@@ -1012,6 +1059,7 @@ def _admin_help_text() -> str:
         "/admin_revoke_premium <telegram_id> — отключить платный доступ\n"
         "/admin_reset_day <telegram_id> — очистить дневник за сегодня\n"
         "/admin_payments [кол-во] — последние платежи\n"
+        "/paymentstatus — диагностика выставления счетов\n"
         "/admin_message <telegram_id> <текст> — написать пользователю\n"
         "/admin_broadcast — рассылка всем пользователям\n"
         "/admin_cancel — отменить админ-действие\n"
@@ -1067,6 +1115,7 @@ def _commands_text(is_admin: bool = False) -> str:
             "/admin_revoke_premium <telegram_id> — отключить платный доступ\n"
             "/admin_reset_day <telegram_id> — очистить дневник пользователя\n"
             "/admin_payments [кол-во] — последние платежи\n"
+            "/paymentstatus — диагностика выставления счетов\n"
             "/admin_message <telegram_id> <текст> — написать пользователю\n"
             "/admin_broadcast — рассылка всем пользователям\n"
             "/admin_cancel — отменить админ-действие\n"
@@ -2088,7 +2137,8 @@ async def payment_email_handler(
             currency="RUB",
             customer_email=email,
         )
-        invoice_link = await bot.create_invoice_link(
+        await bot.send_invoice(
+            chat_id=message.chat.id,
             title=offer["title"],
             description=offer["description"],
             payload=payload,
@@ -2096,16 +2146,27 @@ async def payment_email_handler(
             currency="RUB",
             prices=[LabeledPrice(label=offer["title"], amount=amount)],
             provider_data=_yookassa_provider_data(offer, email),
+            start_parameter=f"dietnik-{plan}-30",
         )
-    except Exception:
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}: {exc}"
+        mark_payment_intent_failed(payload, error_text)
         logger.exception(
-            "Could not create YooKassa invoice user_id=%s plan=%s",
+            "Could not send YooKassa invoice user_id=%s plan=%s error=%s",
             message.from_user.id,
             plan,
+            error_text,
+        )
+        await _notify_payment_error(
+            bot,
+            message.from_user.id,
+            plan,
+            error_text,
         )
         await message.answer(
-            "Не получилось создать счёт ЮKassa. Попробуй ещё раз через раздел "
-            "«Подписка» или напиши /paysupport.",
+            "Не получилось выставить счёт ЮKassa.\n\n"
+            f"{_payment_error_hint(error_text)}\n\n"
+            "Можно повторить через раздел «Подписка» или написать /paysupport.",
             reply_markup=main_menu_keyboard(),
             parse_mode=None,
         )
@@ -2114,21 +2175,12 @@ async def payment_email_handler(
 
     await state.clear()
     await message.answer(
-        "✅ Счёт готов\n\n"
+        "✅ Счёт ЮKassa отправлен выше\n\n"
         f"Тариф: {offer['title']}\n"
         f"Сумма: {offer['price']} ₽\n"
         f"Чек придёт на: {email}\n\n"
-        "Нажми кнопку ниже, чтобы перейти к безопасной оплате через ЮKassa.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"Оплатить {offer['price']} ₽",
-                        url=invoice_link,
-                    )
-                ]
-            ]
-        ),
+        "Нажми кнопку оплаты внутри счёта.",
+        reply_markup=main_menu_keyboard(),
         parse_mode=None,
     )
 
@@ -2268,6 +2320,47 @@ async def admin_health_handler(message: Message) -> None:
         f"Открытых обращений: {stats['open_support_threads']}\n"
         f"Ждут администратора: {stats['escalated_support_threads']}\n"
         f"Приёмов пищи в БД: {stats['meals_count']}"
+    )
+
+
+@router.message(Command("paymentstatus"))
+async def payment_status_handler(message: Message) -> None:
+    if not _is_admin(message):
+        await _deny_admin(message)
+        return
+
+    attempts = get_recent_payment_intents(5)
+    if attempts:
+        lines = []
+        for attempt in attempts:
+            error = (attempt["error_message"] or "нет").replace("\n", " ")[:240]
+            lines.append(
+                f"{attempt['created_at']} · {attempt['plan']} · "
+                f"{attempt['amount'] / 100:.2f} {attempt['currency']} · "
+                f"{attempt['status']}\n"
+                f"Пользователь: <code>{attempt['telegram_id']}</code>\n"
+                f"Ошибка: {_safe(error)}"
+            )
+        attempts_text = "\n\n".join(lines)
+    else:
+        attempts_text = "Попыток выставления счёта пока нет."
+
+    provider_mode = (
+        "TEST"
+        if PAYMENT_PROVIDER_TOKEN and ":TEST:" in PAYMENT_PROVIDER_TOKEN.upper()
+        else "боевой или неизвестный"
+    )
+    await message.answer(
+        "💳 Диагностика оплаты\n\n"
+        f"PAYMENT_PROVIDER_TOKEN: {'задан' if PAYMENT_PROVIDER_TOKEN else 'не задан'}\n"
+        f"Режим токена: {provider_mode if PAYMENT_PROVIDER_TOKEN else '—'}\n"
+        f"Basic: {BASIC_PRICE_RUB} RUB\n"
+        f"Premium: {PREMIUM_PRICE_RUB} RUB\n"
+        f"Код НДС ЮKassa: {YOOKASSA_VAT_CODE}\n\n"
+        "Последние попытки:\n"
+        f"{attempts_text}\n\n"
+        "Важно: подписка на функции бота является цифровой услугой. "
+        "Telegram может отклонять оплату такой подписки в RUB и требовать Stars.",
     )
 
 

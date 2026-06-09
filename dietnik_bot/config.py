@@ -18,9 +18,13 @@ LEGACY_DB_PATH = BASE_DIR / "dietnik.sqlite3"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip() or None
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
-BOT_RELEASE = os.getenv("BOT_RELEASE", "2026.06.09-payments-2")
+BOT_RELEASE = os.getenv("BOT_RELEASE", "2026.06.09-yookassa-api-1")
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
+YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://t.me/").strip()
+YOOKASSA_TAX_SYSTEM_CODE = os.getenv("YOOKASSA_TAX_SYSTEM_CODE", "").strip()
+YOOKASSA_PAYMENT_MODE = os.getenv("YOOKASSA_PAYMENT_MODE", "full_prepayment").strip()
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -42,6 +46,7 @@ AUTO_DB_BACKUP_INTERVAL_HOURS = _get_int_env("AUTO_DB_BACKUP_INTERVAL_HOURS", 6)
 BASIC_PRICE_RUB = max(1, _get_int_env("BASIC_PRICE_RUB", 490))
 PREMIUM_PRICE_RUB = max(1, _get_int_env("PREMIUM_PRICE_RUB", 890))
 YOOKASSA_VAT_CODE = min(6, max(1, _get_int_env("YOOKASSA_VAT_CODE", 1)))
+YOOKASSA_TEST_MODE = _get_bool_env("YOOKASSA_TEST_MODE", False)
 SUPPORT_AI_ENABLED = _get_bool_env("SUPPORT_AI_ENABLED", True)
 SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-4o-mini")
 SUPPORT_MESSAGE_MAX_CHARS = max(200, _get_int_env("SUPPORT_MESSAGE_MAX_CHARS", 1500))

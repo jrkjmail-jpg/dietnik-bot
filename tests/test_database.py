@@ -87,6 +87,17 @@ class DatabaseTests(unittest.TestCase):
             currency="RUB",
             customer_email="user@example.com",
         )
+        database.update_payment_intent_from_yookassa(
+            "dietnik:basic:30:1001:paid",
+            "yk-payment-1",
+            "pending",
+            "https://yookassa.test/pay",
+        )
+        pending_intent = database.get_payment_intent(
+            "dietnik:basic:30:1001:paid"
+        )
+        self.assertEqual(pending_intent["yookassa_payment_id"], "yk-payment-1")
+        self.assertEqual(pending_intent["status"], "pending")
         first = database.activate_subscription_payment(
             telegram_id=1001,
             plan="basic",

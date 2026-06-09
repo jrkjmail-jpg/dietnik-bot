@@ -147,7 +147,9 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'created',
                 created_at TEXT NOT NULL,
                 paid_at TEXT,
-                error_message TEXT
+                error_message TEXT,
+                yookassa_payment_id TEXT,
+                confirmation_url TEXT
             )
             """
         )
@@ -189,6 +191,8 @@ def init_db() -> None:
         _ensure_column(conn, "subscriptions", "is_recurring", "INTEGER DEFAULT 0")
         _ensure_column(conn, "subscriptions", "customer_email", "TEXT")
         _ensure_column(conn, "payment_intents", "error_message", "TEXT")
+        _ensure_column(conn, "payment_intents", "yookassa_payment_id", "TEXT")
+        _ensure_column(conn, "payment_intents", "confirmation_url", "TEXT")
         conn.execute(
             """
             DELETE FROM subscriptions
@@ -501,6 +505,33 @@ def mark_payment_intent_failed(payload: str, error_message: str) -> None:
         )
 
 
+def update_payment_intent_from_yookassa(
+    payload: str,
+    yookassa_payment_id: str,
+    status: str,
+    confirmation_url: str,
+) -> None:
+    """Attach YooKassa identifiers and redirect URL to a local order."""
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE payment_intents
+            SET yookassa_payment_id = ?, status = ?,
+                confirmation_url = ?, error_message = NULL
+            WHERE payload = ?
+            """,
+            (yookassa_payment_id, status, confirmation_url, payload),
+        )
+
+
+def mark_payment_intent_status(payload: str, status: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE payment_intents SET status = ? WHERE payload = ?",
+            (status, payload),
+        )
+
+
 def get_recent_payment_intents(limit: int = 5) -> list[dict]:
     """Return recent invoice creation attempts for admin diagnostics."""
     with _connect() as conn:
@@ -508,7 +539,8 @@ def get_recent_payment_intents(limit: int = 5) -> list[dict]:
             """
             SELECT
                 payload, telegram_id, plan, amount, currency,
-                status, error_message, created_at, paid_at
+                status, error_message, yookassa_payment_id,
+                confirmation_url, created_at, paid_at
             FROM payment_intents
             ORDER BY created_at DESC
             LIMIT ?

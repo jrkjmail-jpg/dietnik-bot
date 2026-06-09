@@ -1,12 +1,12 @@
 """Telegram bot entry point for Dietnik."""
 
 import asyncio
-import json
 import logging
 import re
 import secrets
 import tempfile
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from html import escape
 from pathlib import Path
 
@@ -21,9 +21,7 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    LabeledPrice,
     Message,
-    PreCheckoutQuery,
 )
 
 from config import (
@@ -35,7 +33,6 @@ from config import (
     DATA_DIR,
     DB_PATH,
     OPENAI_API_KEY,
-    PAYMENT_PROVIDER_TOKEN,
     PERSISTENCE_PATH,
     PREMIUM_PRICE_RUB,
     SUPPORT_ADMIN_CHAT_ID,
@@ -43,6 +40,12 @@ from config import (
     SUPPORT_ATTACHMENT_MAX_FILE_BYTES,
     SUPPORT_MESSAGE_MAX_CHARS,
     SUPPORT_USERNAME,
+    YOOKASSA_PAYMENT_MODE,
+    YOOKASSA_RETURN_URL,
+    YOOKASSA_SECRET_KEY,
+    YOOKASSA_SHOP_ID,
+    YOOKASSA_TAX_SYSTEM_CODE,
+    YOOKASSA_TEST_MODE,
     YOOKASSA_VAT_CODE,
     validate_config,
 )
@@ -69,6 +72,7 @@ from database import (
     get_recent_support_messages,
     log_support_message,
     mark_payment_intent_failed,
+    mark_payment_intent_status,
     mark_trial_used,
     remember_support_admin_message,
     reset_today,
@@ -79,6 +83,7 @@ from database import (
     save_payment_intent,
     save_user,
     set_subscription,
+    update_payment_intent_from_yookassa,
 )
 from keyboards import (
     activity_keyboard,
@@ -93,6 +98,7 @@ from keyboards import (
 )
 from nutrition import calculate_norm, calculate_remaining
 from openai_service import analyze_food_photo, ask_dietitian, ask_support_ai
+from yookassa_service import create_payment, get_payment, is_configured
 
 
 router = Router()
@@ -451,7 +457,7 @@ def _subscription_markup(user: dict) -> InlineKeyboardMarkup:
     return subscription_keyboard(
         BASIC_PRICE_RUB,
         PREMIUM_PRICE_RUB,
-        bool(PAYMENT_PROVIDER_TOKEN),
+        is_configured(),
         current_plan=current_plan,
     )
 
@@ -461,61 +467,17 @@ def _new_payment_payload(telegram_id: int, plan: str) -> str:
     return f"dietnik:{plan}:30:{telegram_id}:{token}"
 
 
-def _yookassa_provider_data(offer: dict, email: str) -> str:
-    """Build fiscal receipt data when email was collected in the bot dialog."""
-    return json.dumps(
-        {
-            "receipt": {
-                "customer": {"email": email},
-                "items": [
-                    {
-                        "description": offer["title"],
-                        "quantity": "1.00",
-                        "amount": {
-                            "value": f"{offer['price']:.2f}",
-                            "currency": "RUB",
-                        },
-                        "vat_code": YOOKASSA_VAT_CODE,
-                        "payment_mode": "full_payment",
-                        "payment_subject": "service",
-                    }
-                ],
-            }
-        },
-        ensure_ascii=False,
-    )
-
-
-def _payment_details(payload: str) -> tuple[str, dict, dict | None] | None:
-    intent = get_payment_intent(payload)
-    if intent:
-        offer = SUBSCRIPTION_OFFERS.get(intent["plan"])
-        if offer:
-            return intent["plan"], offer, intent
-        return None
-    for plan, offer in SUBSCRIPTION_OFFERS.items():
-        if offer["payload"] == payload:
-            return plan, offer, None
-    return None
-
-
 def _payment_error_hint(error_text: str) -> str:
     normalized = error_text.casefold()
-    if "payment_provider_invalid" in normalized:
+    if "401" in normalized or "unauthorized" in normalized:
         return (
-            "Платёжный токен ЮKassa недействителен. Переподключи ЮKassa в "
-            "@BotFather и замени PAYMENT_PROVIDER_TOKEN в BotHost."
+            "ЮKassa отклонила shopId или secretKey. Проверь "
+            "YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в BotHost."
         )
-    if "currency_total_amount_invalid" in normalized:
-        return "Telegram отклонил валюту или сумму счёта."
-    if "digital goods" in normalized or "stars" in normalized or "xtr" in normalized:
-        return (
-            "Telegram отклонил оплату цифровой подписки в рублях. "
-            "Для цифровых функций Telegram требует оплату в Stars."
-        )
+    if "receipt" in normalized or "vat_code" in normalized:
+        return "ЮKassa отклонила настройки электронного чека или НДС."
     return (
-        "Telegram или ЮKassa отклонили создание счёта. Проверь платёжный токен, "
-        "подключение магазина и настройки чеков."
+        "ЮKassa отклонила создание платежа. Проверь магазин, ключи и настройки чека."
     )
 
 
@@ -1059,7 +1021,7 @@ def _admin_help_text() -> str:
         "/admin_revoke_premium <telegram_id> — отключить платный доступ\n"
         "/admin_reset_day <telegram_id> — очистить дневник за сегодня\n"
         "/admin_payments [кол-во] — последние платежи\n"
-        "/paymentstatus — диагностика выставления счетов\n"
+        "/paymentstatus или /paystatus — диагностика оплаты\n"
         "/admin_message <telegram_id> <текст> — написать пользователю\n"
         "/admin_broadcast — рассылка всем пользователям\n"
         "/admin_cancel — отменить админ-действие\n"
@@ -1115,7 +1077,7 @@ def _commands_text(is_admin: bool = False) -> str:
             "/admin_revoke_premium <telegram_id> — отключить платный доступ\n"
             "/admin_reset_day <telegram_id> — очистить дневник пользователя\n"
             "/admin_payments [кол-во] — последние платежи\n"
-            "/paymentstatus — диагностика выставления счетов\n"
+            "/paymentstatus или /paystatus — диагностика оплаты\n"
             "/admin_message <telegram_id> <текст> — написать пользователю\n"
             "/admin_broadcast — рассылка всем пользователям\n"
             "/admin_cancel — отменить админ-действие\n"
@@ -2063,7 +2025,8 @@ async def show_subscriptions_callback(callback: CallbackQuery) -> None:
 async def payment_unavailable_callback(callback: CallbackQuery) -> None:
     await callback.message.answer(
         "Оплата через ЮKassa ещё не подключена на сервере.\n\n"
-        "Администратору нужно добавить PAYMENT_PROVIDER_TOKEN в BotHost и сделать редеплой.",
+        "Администратору нужно добавить YOOKASSA_SHOP_ID и "
+        "YOOKASSA_SECRET_KEY в BotHost и сделать редеплой.",
         parse_mode=None,
     )
     await callback.answer()
@@ -2074,7 +2037,7 @@ async def buy_subscription_handler(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
-    if not PAYMENT_PROVIDER_TOKEN:
+    if not is_configured():
         await payment_unavailable_callback(callback)
         return
 
@@ -2137,16 +2100,21 @@ async def payment_email_handler(
             currency="RUB",
             customer_email=email,
         )
-        await bot.send_invoice(
-            chat_id=message.chat.id,
-            title=offer["title"],
-            description=offer["description"],
-            payload=payload,
-            provider_token=PAYMENT_PROVIDER_TOKEN,
-            currency="RUB",
-            prices=[LabeledPrice(label=offer["title"], amount=amount)],
-            provider_data=_yookassa_provider_data(offer, email),
-            start_parameter=f"dietnik-{plan}-30",
+        payment = await asyncio.to_thread(
+            create_payment,
+            payload,
+            message.from_user.id,
+            plan,
+            offer["title"],
+            amount,
+            email,
+        )
+        confirmation_url = payment["confirmation"]["confirmation_url"]
+        update_payment_intent_from_yookassa(
+            payload,
+            payment["id"],
+            payment["status"],
+            confirmation_url,
         )
     except Exception as exc:
         error_text = f"{type(exc).__name__}: {exc}"
@@ -2175,77 +2143,33 @@ async def payment_email_handler(
 
     await state.clear()
     await message.answer(
-        "✅ Счёт ЮKassa отправлен выше\n\n"
+        ("🧪 Тестовый платёж ЮKassa\n\n" if YOOKASSA_TEST_MODE else "")
+        + "✅ Ссылка на оплату готова\n\n"
         f"Тариф: {offer['title']}\n"
         f"Сумма: {offer['price']} ₽\n"
         f"Чек придёт на: {email}\n\n"
-        "Нажми кнопку оплаты внутри счёта.",
-        reply_markup=main_menu_keyboard(),
+        "После оплаты нажми «Проверить оплату».",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"Оплатить {offer['price']} ₽",
+                        url=confirmation_url,
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Проверить оплату",
+                        callback_data=f"paycheck:{payload}",
+                    )
+                ],
+            ]
+        ),
         parse_mode=None,
     )
 
 
-@router.pre_checkout_query()
-async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
-    details = _payment_details(pre_checkout_query.invoice_payload)
-    offer = details[1] if details else None
-    intent = details[2] if details else None
-    valid = bool(
-        offer
-        and pre_checkout_query.currency == "RUB"
-        and pre_checkout_query.total_amount == offer["price"] * 100
-        and (
-            intent is None
-            or (
-                intent["telegram_id"] == pre_checkout_query.from_user.id
-                and intent["amount"] == pre_checkout_query.total_amount
-                and intent["currency"] == pre_checkout_query.currency
-                and intent["status"] == "created"
-            )
-        )
-    )
-    if valid:
-        await pre_checkout_query.answer(ok=True)
-        return
-    await pre_checkout_query.answer(
-        ok=False,
-        error_message="Счёт устарел или содержит неверную сумму. Открой раздел «Подписка» ещё раз.",
-    )
-
-
-@router.message(F.successful_payment)
-async def successful_payment_handler(message: Message, bot: Bot) -> None:
-    payment = message.successful_payment
-    details = _payment_details(payment.invoice_payload)
-    if (
-        not details
-        or payment.currency != "RUB"
-        or payment.total_amount != details[1]["price"] * 100
-        or (
-            details[2] is not None
-            and details[2]["telegram_id"] != message.from_user.id
-        )
-    ):
-        logger.error(
-            "Rejected unexpected successful payment user_id=%s payload=%r currency=%s amount=%s",
-            message.from_user.id,
-            payment.invoice_payload,
-            payment.currency,
-            payment.total_amount,
-        )
-        await message.answer(
-            f"Платёж получен, но его параметры не совпали с тарифом. Напиши /paysupport. "
-            f"ID операции: {payment.telegram_payment_charge_id}",
-            parse_mode=None,
-        )
-        return
-
-    plan, offer, intent = details
-    user = get_user(message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройди настройку через /start, затем напиши /paysupport.")
-        return
-
+def _subscription_until_after_payment(user: dict) -> str:
     start_date = date.today()
     current_until = user.get("subscription_until") or user.get("premium_until")
     if current_until:
@@ -2255,23 +2179,82 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
                 start_date = parsed_until
         except ValueError:
             pass
-    subscription_until = (start_date + timedelta(days=MONTH_DAYS)).isoformat()
+    return (start_date + timedelta(days=MONTH_DAYS)).isoformat()
 
+
+def _validate_direct_payment(intent: dict, payment: dict) -> str | None:
+    if payment.get("id") != intent.get("yookassa_payment_id"):
+        return "payment_id_mismatch"
+    if payment.get("status") != "succeeded" or not payment.get("paid"):
+        return "not_paid"
+    amount = payment.get("amount") or {}
+    try:
+        amount_kopecks = int(Decimal(str(amount.get("value"))) * 100)
+    except (InvalidOperation, TypeError, ValueError):
+        return "invalid_amount"
+    if amount_kopecks != intent["amount"] or amount.get("currency") != intent["currency"]:
+        return "amount_mismatch"
+    metadata = payment.get("metadata") or {}
+    if metadata.get("local_payment_id") != intent["payload"]:
+        return "local_payment_id_mismatch"
+    if metadata.get("telegram_id") != str(intent["telegram_id"]):
+        return "telegram_id_mismatch"
+    if metadata.get("plan") != intent["plan"]:
+        return "plan_mismatch"
+    return None
+
+
+async def _activate_direct_payment(
+    message: Message,
+    bot: Bot,
+    intent: dict,
+    payment: dict,
+) -> None:
+    user = get_user(intent["telegram_id"])
+    if not user:
+        await message.answer("Профиль пользователя не найден. Напиши /paysupport.")
+        return
+    validation_error = _validate_direct_payment(intent, payment)
+    if validation_error == "not_paid":
+        payment_status = payment.get("status") or "pending"
+        mark_payment_intent_status(intent["payload"], payment_status)
+        if payment_status == "canceled":
+            await message.answer(
+                "Платёж отменён ЮKassa. Открой раздел «Подписка» и создай новую ссылку.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+        await message.answer(
+            "Платёж пока не подтверждён ЮKassa. Если ты только что оплатил, "
+            "подожди несколько секунд и нажми кнопку ещё раз.",
+            parse_mode=None,
+        )
+        return
+    if validation_error:
+        mark_payment_intent_failed(intent["payload"], validation_error)
+        logger.error(
+            "Rejected YooKassa payment payload=%s error=%s",
+            intent["payload"],
+            validation_error,
+        )
+        await message.answer(
+            "Параметры платежа не прошли проверку. Деньги и доступ автоматически "
+            "не менялись. Напиши /paysupport.",
+            parse_mode=None,
+        )
+        return
+
+    subscription_until = _subscription_until_after_payment(user)
     inserted = activate_subscription_payment(
-        telegram_id=message.from_user.id,
-        plan=plan,
-        amount=payment.total_amount,
-        currency=payment.currency,
-        provider_payment_charge_id=payment.provider_payment_charge_id or "",
-        telegram_payment_charge_id=payment.telegram_payment_charge_id,
-        invoice_payload=payment.invoice_payload,
+        telegram_id=intent["telegram_id"],
+        plan=intent["plan"],
+        amount=intent["amount"],
+        currency=intent["currency"],
+        provider_payment_charge_id=payment["id"],
+        telegram_payment_charge_id=f"yookassa:{payment['id']}",
+        invoice_payload=intent["payload"],
         subscription_until=subscription_until,
-        is_recurring=bool(getattr(payment, "is_recurring", False)),
-        customer_email=(
-            intent["customer_email"]
-            if intent
-            else getattr(getattr(payment, "order_info", None), "email", None)
-        ),
+        customer_email=intent["customer_email"],
     )
     if not inserted:
         await message.answer(
@@ -2280,6 +2263,7 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
         )
         return
 
+    offer = SUBSCRIPTION_OFFERS[intent["plan"]]
     await message.answer(
         "✅ Оплата прошла успешно!\n\n"
         f"{offer['title']} активирован до {subscription_until}.\n"
@@ -2287,6 +2271,33 @@ async def successful_payment_handler(message: Message, bot: Bot) -> None:
         reply_markup=main_menu_keyboard(),
     )
     await _maybe_auto_backup_db(bot, "successful_payment")
+
+
+@router.callback_query(F.data.startswith("paycheck:"))
+async def check_yookassa_payment_handler(callback: CallbackQuery, bot: Bot) -> None:
+    await callback.answer()
+    payload = callback.data.removeprefix("paycheck:")
+    intent = get_payment_intent(payload)
+    if not intent or intent["telegram_id"] != callback.from_user.id:
+        await callback.message.answer("Этот платёж не найден или принадлежит другому пользователю.")
+        return
+    if intent["status"] == "paid":
+        await callback.message.answer("✅ Этот платёж уже обработан, подписка активна.")
+        return
+    if not intent.get("yookassa_payment_id"):
+        await callback.message.answer("У платежа нет ID ЮKassa. Создай новый счёт.")
+        return
+    try:
+        payment = await asyncio.to_thread(get_payment, intent["yookassa_payment_id"])
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}: {exc}"
+        logger.exception("Could not check YooKassa payment payload=%s", payload)
+        await _notify_payment_error(bot, callback.from_user.id, intent["plan"], error_text)
+        await callback.message.answer(
+            "Не удалось проверить платёж в ЮKassa. Попробуй через минуту или напиши /paysupport."
+        )
+        return
+    await _activate_direct_payment(callback.message, bot, intent, payment)
 
 
 @router.message(Command("admin", "admin_help"))
@@ -2308,7 +2319,7 @@ async def admin_health_handler(message: Message) -> None:
         "🩺 Диагностика\n\n"
         f"ADMIN_IDS настроены: {'да' if ADMIN_IDS else 'нет'}\n"
         f"OpenAI ключ: {'есть' if OPENAI_API_KEY else 'нет'}\n"
-        f"Оплата ЮKassa: {'подключена' if PAYMENT_PROVIDER_TOKEN else 'не подключена'}\n"
+        f"Оплата ЮKassa API: {'подключена' if is_configured() else 'не подключена'}\n"
         f"Цена Basic: {BASIC_PRICE_RUB} RUB\n"
         f"Цена Premium: {PREMIUM_PRICE_RUB} RUB\n"
         f"AI-поддержка: {'включена' if SUPPORT_AI_ENABLED else 'выключена'}\n"
@@ -2323,7 +2334,7 @@ async def admin_health_handler(message: Message) -> None:
     )
 
 
-@router.message(Command("paymentstatus"))
+@router.message(Command("paymentstatus", "paystatus"))
 async def payment_status_handler(message: Message) -> None:
     if not _is_admin(message):
         await _deny_admin(message)
@@ -2339,28 +2350,34 @@ async def payment_status_handler(message: Message) -> None:
                 f"{attempt['amount'] / 100:.2f} {attempt['currency']} · "
                 f"{attempt['status']}\n"
                 f"Пользователь: <code>{attempt['telegram_id']}</code>\n"
+                f"ЮKassa ID: <code>{attempt['yookassa_payment_id'] or '-'}</code>\n"
                 f"Ошибка: {_safe(error)}"
             )
         attempts_text = "\n\n".join(lines)
     else:
         attempts_text = "Попыток выставления счёта пока нет."
 
-    provider_mode = (
-        "TEST"
-        if PAYMENT_PROVIDER_TOKEN and ":TEST:" in PAYMENT_PROVIDER_TOKEN.upper()
-        else "боевой или неизвестный"
+    provider_mode = "тестовый" if YOOKASSA_TEST_MODE else "боевой"
+    secret_kind = (
+        "не задан"
+        if not YOOKASSA_SECRET_KEY
+        else "похоже тестовый"
+        if YOOKASSA_SECRET_KEY.startswith("test_")
+        else "похоже боевой"
     )
     await message.answer(
         "💳 Диагностика оплаты\n\n"
-        f"PAYMENT_PROVIDER_TOKEN: {'задан' if PAYMENT_PROVIDER_TOKEN else 'не задан'}\n"
-        f"Режим токена: {provider_mode if PAYMENT_PROVIDER_TOKEN else '—'}\n"
+        f"YOOKASSA_SHOP_ID: {'задан' if YOOKASSA_SHOP_ID else 'не задан'}\n"
+        f"YOOKASSA_SECRET_KEY: {secret_kind}\n"
+        f"Режим: {provider_mode}\n"
+        f"Return URL: {_safe(YOOKASSA_RETURN_URL)}\n"
         f"Basic: {BASIC_PRICE_RUB} RUB\n"
         f"Premium: {PREMIUM_PRICE_RUB} RUB\n"
-        f"Код НДС ЮKassa: {YOOKASSA_VAT_CODE}\n\n"
+        f"Код НДС: {YOOKASSA_VAT_CODE}\n"
+        f"Система налогообложения: {YOOKASSA_TAX_SYSTEM_CODE or 'не задана'}\n"
+        f"Признак способа расчёта: {_safe(YOOKASSA_PAYMENT_MODE)}\n\n"
         "Последние попытки:\n"
-        f"{attempts_text}\n\n"
-        "Важно: подписка на функции бота является цифровой услугой. "
-        "Telegram может отклонять оплату такой подписки в RUB и требовать Stars.",
+        f"{attempts_text}",
     )
 
 

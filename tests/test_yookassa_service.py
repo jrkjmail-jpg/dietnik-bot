@@ -154,6 +154,24 @@ class YooKassaServiceTests(unittest.TestCase):
             any(str(expected_price) in button.text for button in buttons)
         )
 
+    def test_premium_upgrade_never_exceeds_full_price_difference(self) -> None:
+        expiry = date.today() + timedelta(days=60)
+        user = {
+            "subscription_plan": "basic",
+            "subscription_until": expiry.isoformat(),
+            "premium_until": None,
+        }
+
+        upgrade = main._premium_upgrade_details(user)
+
+        self.assertEqual(
+            upgrade["price"],
+            main.PREMIUM_PRICE_RUB - main.BASIC_PRICE_RUB,
+        )
+        self.assertEqual(upgrade["days"], 60)
+        self.assertEqual(upgrade["billable_days"], 30)
+        self.assertEqual(upgrade["subscription_until"], expiry.isoformat())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -442,8 +442,8 @@ def _format_subscription(user: dict | None) -> str:
     upgrade = _premium_upgrade_details(user) if user else None
     upgrade_line = (
         f"\n\n⬆️ Переход с Basic на Premium сейчас: {upgrade['price']} ₽.\n"
-        f"Доплата рассчитана за оставшиеся {upgrade['days']} дн. Basic; "
-        f"Premium будет действовать до {upgrade['formatted_until']}."
+        f"Premium будет действовать до {upgrade['formatted_until']}. "
+        f"Максимальная доплата — {PREMIUM_PRICE_RUB - BASIC_PRICE_RUB} ₽."
         if upgrade
         else ""
     )
@@ -471,14 +471,16 @@ def _premium_upgrade_details(user: dict | None) -> dict | None:
     if expiry is None:
         expiry = date.today() + timedelta(days=MONTH_DAYS)
     remaining_days = max(1, (expiry - date.today()).days)
+    billable_days = min(MONTH_DAYS, remaining_days)
     full_difference = max(1, PREMIUM_PRICE_RUB - BASIC_PRICE_RUB)
     price = int(
-        (Decimal(full_difference * remaining_days) / MONTH_DAYS)
+        (Decimal(full_difference * billable_days) / MONTH_DAYS)
         .quantize(Decimal("1"), rounding=ROUND_CEILING)
     )
     return {
         "price": max(1, price),
         "days": remaining_days,
+        "billable_days": billable_days,
         "subscription_until": expiry.isoformat(),
         "formatted_until": expiry.strftime("%d.%m.%Y"),
     }
@@ -746,8 +748,8 @@ def _format_recipe_suggestions(user: dict, remaining: dict, mode: str = "") -> s
 def _premium_required_text(user: dict | None = None) -> str:
     upgrade = _premium_upgrade_details(user)
     price_line = (
-        f"Доплата с Basic: {upgrade['price']} ₽ за оставшиеся "
-        f"{upgrade['days']} дн., до {upgrade['formatted_until']}."
+        f"Доплата с Basic: {upgrade['price']} ₽. "
+        f"Premium будет действовать до {upgrade['formatted_until']}."
         if upgrade
         else f"Стоимость: {PREMIUM_PRICE_RUB} ₽ на 30 дней."
     )

@@ -70,10 +70,15 @@ def subscription_keyboard(
     current_plan: str = "trial",
     premium_only: bool = False,
     premium_upgrade_price_rub: int | None = None,
+    renewal_available: bool = False,
 ) -> InlineKeyboardMarkup:
     if payments_enabled:
         payment_buttons = []
-        if not premium_only and current_plan != "premium":
+        if (
+            not premium_only
+            and current_plan != "premium"
+            and (current_plan != "basic" or renewal_available)
+        ):
             basic_label = (
                 f"Продлить Basic — {basic_price_rub} ₽"
                 if current_plan == "basic"
@@ -87,7 +92,7 @@ def subscription_keyboard(
                     )
                 ]
             )
-        if current_plan != "premium" or not premium_only:
+        if current_plan != "premium" or renewal_available:
             premium_label = (
                 f"⬆️ Повысить до Premium — {premium_upgrade_price_rub} ₽"
                 if current_plan == "basic" and premium_upgrade_price_rub is not None

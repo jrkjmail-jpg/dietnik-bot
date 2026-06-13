@@ -172,6 +172,50 @@ class YooKassaServiceTests(unittest.TestCase):
         self.assertEqual(upgrade["billable_days"], 30)
         self.assertEqual(upgrade["subscription_until"], expiry.isoformat())
 
+    def test_same_plan_cannot_be_stacked_before_renewal_window(self) -> None:
+        expiry = date.today() + timedelta(days=15)
+        user = {
+            "subscription_plan": "basic",
+            "subscription_until": expiry.isoformat(),
+            "premium_until": None,
+        }
+
+        self.assertIsNone(main._renewal_details(user))
+        self.assertIsNone(main._checkout_offer(user, "basic"))
+        with patch.object(main, "is_configured", return_value=True):
+            markup = main._subscription_markup(user)
+        callbacks = [
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+        ]
+        self.assertNotIn("buy_basic", callbacks)
+        self.assertIn("buy_premium", callbacks)
+
+    def test_same_plan_can_be_renewed_in_last_three_days(self) -> None:
+        expiry = date.today() + timedelta(days=2)
+        user = {
+            "subscription_plan": "premium",
+            "subscription_until": expiry.isoformat(),
+            "premium_until": expiry.isoformat(),
+        }
+
+        renewal = main._renewal_details(user)
+        offer = main._checkout_offer(user, "premium")
+        with patch.object(main, "is_configured", return_value=True):
+            markup = main._subscription_markup(user)
+        callbacks = [
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+        ]
+
+        expected_until = (expiry + timedelta(days=30)).isoformat()
+        self.assertEqual(renewal["subscription_until"], expected_until)
+        self.assertEqual(offer["subscription_until"], expected_until)
+        self.assertTrue(offer["is_renewal"])
+        self.assertIn("buy_premium", callbacks)
+
 
 if __name__ == "__main__":
     unittest.main()

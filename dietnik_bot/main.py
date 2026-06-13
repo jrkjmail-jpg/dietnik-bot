@@ -143,6 +143,7 @@ class AdminPanel(StatesGroup):
 
 
 MONTH_DAYS = 30
+RENEWAL_WINDOW_DAYS = 3
 SUBSCRIPTION_OFFERS = {
     "basic": {
         "price": BASIC_PRICE_RUB,
@@ -440,6 +441,7 @@ def _format_subscription(user: dict | None) -> str:
         else ""
     )
     upgrade = _premium_upgrade_details(user) if user else None
+    renewal = _renewal_details(user) if user else None
     upgrade_line = (
         f"\n\n⬆️ Переход с Basic на Premium сейчас: {upgrade['price']} ₽.\n"
         f"Premium будет действовать до {upgrade['formatted_until']}. "
@@ -447,6 +449,16 @@ def _format_subscription(user: dict | None) -> str:
         if upgrade
         else ""
     )
+    renewal_line = ""
+    if user and _has_active_subscription(user) and not upgrade:
+        renewal_line = (
+            f"\n\n🔄 Подписку уже можно продлить ещё на {MONTH_DAYS} дней."
+            if renewal
+            else (
+                f"\n\n🔄 Ручное продление откроется за "
+                f"{RENEWAL_WINDOW_DAYS} дня до окончания."
+            )
+        )
     return (
         "💳 Подписка Dietnik\n\n"
         f"Текущий тариф: {current_plan}{expiry_line}\n\n"
@@ -454,7 +466,7 @@ def _format_subscription(user: dict | None) -> str:
         "Дневник · фото-учёт · AI-анализ еды · дневная цель · рекомендации\n\n"
         f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽ / 30 дней\n"
         "Всё из Basic · AI-диетолог · рецепты под остаток КБЖУ · "
-        f"отчёты за 7, 30 дней и весь период{upgrade_line}\n\n"
+        f"отчёты за 7, 30 дней и весь период{upgrade_line}{renewal_line}\n\n"
         "Premium делает бота персональным ассистентом, а не просто счётчиком калорий."
     )
 
@@ -486,6 +498,23 @@ def _premium_upgrade_details(user: dict | None) -> dict | None:
     }
 
 
+def _renewal_details(user: dict | None) -> dict | None:
+    if not user or not _has_active_subscription(user):
+        return None
+    expiry = _subscription_expiry(user)
+    if expiry is None:
+        return None
+    days_remaining = (expiry - date.today()).days
+    if days_remaining > RENEWAL_WINDOW_DAYS:
+        return None
+    return {
+        "plan": user.get("subscription_plan"),
+        "days_remaining": max(0, days_remaining),
+        "subscription_until": (expiry + timedelta(days=MONTH_DAYS)).isoformat(),
+        "formatted_until": (expiry + timedelta(days=MONTH_DAYS)).strftime("%d.%m.%Y"),
+    }
+
+
 def _subscription_markup(
     user: dict,
     premium_only: bool = False,
@@ -496,6 +525,7 @@ def _subscription_markup(
         else "trial"
     )
     upgrade = _premium_upgrade_details(user)
+    renewal = _renewal_details(user)
     return subscription_keyboard(
         BASIC_PRICE_RUB,
         PREMIUM_PRICE_RUB,
@@ -503,6 +533,7 @@ def _subscription_markup(
         current_plan=current_plan,
         premium_only=premium_only,
         premium_upgrade_price_rub=upgrade["price"] if upgrade else None,
+        renewal_available=bool(renewal),
     )
 
 
@@ -1882,8 +1913,10 @@ async def terms_handler(message: Message) -> None:
         "Premium дополнительно открывает AI-диетолога, рецепты и отчёты.\n"
         "При переходе с активного Basic на Premium оплачивается разница "
         "пропорционально оставшимся дням Basic.\n"
+        f"Ручное продление текущего тарифа открывается за "
+        f"{RENEWAL_WINDOW_DAYS} дня до окончания.\n"
         "После оплаты доступ активируется автоматически.\n\n"
-        "Платёж является разовым и не продлевается автоматически.\n\n"
+        "Платёж является разовым. Автоплатёж пока не подключён.\n\n"
         "Dietnik помогает вести дневник питания, но не заменяет врача. "
         "Расчёты по фото являются оценкой и зависят от размера порции.\n\n"
         f"Вопросы по оплате: /paysupport или {SUPPORT_USERNAME}",
@@ -2108,9 +2141,31 @@ def _checkout_offer(user: dict, plan: str) -> dict | None:
     if not base_offer:
         return None
 
+    current_plan = user.get("subscription_plan")
+    has_active_subscription = _has_active_subscription(user)
+    renewal = _renewal_details(user)
+
+    if has_active_subscription and plan == current_plan:
+        if not renewal:
+            return None
+        offer = dict(base_offer)
+        offer.update(
+            {
+                "title": (
+                    f"Продление Dietnik {plan.title()} "
+                    f"до {renewal['formatted_until']}"
+                ),
+                "subscription_until": renewal["subscription_until"],
+                "is_upgrade": False,
+                "is_renewal": True,
+            }
+        )
+        return offer
+
     offer = dict(base_offer)
     offer["subscription_until"] = _subscription_until_after_payment(user)
     offer["is_upgrade"] = False
+    offer["is_renewal"] = False
 
     if plan == "premium":
         upgrade = _premium_upgrade_details(user)
@@ -2124,6 +2179,7 @@ def _checkout_offer(user: dict, plan: str) -> dict | None:
                     ),
                     "subscription_until": upgrade["subscription_until"],
                     "is_upgrade": True,
+                    "is_renewal": False,
                 }
             )
     return offer
@@ -2148,7 +2204,13 @@ async def buy_subscription_handler(
         return
     offer = _checkout_offer(user, plan)
     if not offer:
-        await callback.answer("Не удалось определить тариф", show_alert=True)
+        expiry = _subscription_expiry(user)
+        expiry_text = expiry.strftime("%d.%m.%Y") if expiry else "без ограничения"
+        await callback.answer(
+            f"Тариф уже активен до {expiry_text}. "
+            f"Продление откроется за {RENEWAL_WINDOW_DAYS} дня до окончания.",
+            show_alert=True,
+        )
         return
     await callback.answer()
     await state.clear()
@@ -2159,6 +2221,7 @@ async def buy_subscription_handler(
         payment_title=offer["title"],
         payment_subscription_until=offer["subscription_until"],
         payment_is_upgrade=offer["is_upgrade"],
+        payment_is_renewal=offer["is_renewal"],
     )
     upgrade_text = (
         "\n\nЭто доплата за оставшийся срок Basic. "
@@ -2166,11 +2229,16 @@ async def buy_subscription_handler(
         if offer["is_upgrade"]
         else ""
     )
+    renewal_text = (
+        "\n\nЭто ручное продление ещё на 30 дней."
+        if offer["is_renewal"]
+        else ""
+    )
     await callback.message.answer(
         "📧 Укажи email для электронного чека ЮKassa.\n\n"
         f"Платёж: {offer['title']}\n"
         f"Сумма: {offer['price']} ₽"
-        f"{upgrade_text}\n\n"
+        f"{upgrade_text}{renewal_text}\n\n"
         "Например: name@example.com\n"
         "Для отмены отправь /cancel.",
         parse_mode=None,
@@ -2292,16 +2360,8 @@ async def payment_email_handler(
 
 
 def _subscription_until_after_payment(user: dict) -> str:
-    start_date = date.today()
-    current_until = user.get("subscription_until") or user.get("premium_until")
-    if current_until:
-        try:
-            parsed_until = date.fromisoformat(current_until)
-            if parsed_until > start_date:
-                start_date = parsed_until
-        except ValueError:
-            pass
-    return (start_date + timedelta(days=MONTH_DAYS)).isoformat()
+    """Return a fresh one-month term without stacking active months."""
+    return (date.today() + timedelta(days=MONTH_DAYS)).isoformat()
 
 
 def _validate_direct_payment(intent: dict, payment: dict) -> str | None:

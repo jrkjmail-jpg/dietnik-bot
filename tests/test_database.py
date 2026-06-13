@@ -86,6 +86,7 @@ class DatabaseTests(unittest.TestCase):
             amount=49000,
             currency="RUB",
             customer_email="user@example.com",
+            subscription_until="2026-07-07",
         )
         database.update_payment_intent_from_yookassa(
             "dietnik:basic:30:1001:paid",
@@ -98,6 +99,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(pending_intent["yookassa_payment_id"], "yk-payment-1")
         self.assertEqual(pending_intent["status"], "pending")
+        self.assertEqual(pending_intent["subscription_until"], "2026-07-07")
         pending = database.get_pending_payment_intents()
         self.assertEqual([item["payload"] for item in pending], [
             "dietnik:basic:30:1001:paid"

@@ -150,7 +150,8 @@ def init_db() -> None:
                 error_message TEXT,
                 yookassa_payment_id TEXT,
                 confirmation_url TEXT,
-                notification_sent_at TEXT
+                notification_sent_at TEXT,
+                subscription_until TEXT
             )
             """
         )
@@ -208,6 +209,7 @@ def init_db() -> None:
                 WHERE status = 'paid'
                 """
             )
+        _ensure_column(conn, "payment_intents", "subscription_until", "TEXT")
         conn.execute(
             """
             DELETE FROM subscriptions
@@ -474,6 +476,7 @@ def save_payment_intent(
     amount: int,
     currency: str,
     customer_email: str,
+    subscription_until: str | None = None,
 ) -> None:
     """Persist an invoice before its payment link is shown to the user."""
     if plan not in {"basic", "premium"}:
@@ -483,9 +486,9 @@ def save_payment_intent(
             """
             INSERT INTO payment_intents (
                 payload, telegram_id, plan, amount, currency,
-                customer_email, status, created_at
+                customer_email, subscription_until, status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'created', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'created', ?)
             """,
             (
                 payload,
@@ -494,6 +497,7 @@ def save_payment_intent(
                 amount,
                 currency,
                 customer_email,
+                subscription_until,
                 _now(),
             ),
         )

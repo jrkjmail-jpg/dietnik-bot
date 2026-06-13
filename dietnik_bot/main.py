@@ -6,7 +6,7 @@ import re
 import secrets
 import tempfile
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from html import escape
 from pathlib import Path
 
@@ -439,6 +439,14 @@ def _format_subscription(user: dict | None) -> str:
         if user and _has_active_subscription(user) and expiry
         else ""
     )
+    upgrade = _premium_upgrade_details(user) if user else None
+    upgrade_line = (
+        f"\n\n⬆️ Переход с Basic на Premium сейчас: {upgrade['price']} ₽.\n"
+        f"Доплата рассчитана за оставшиеся {upgrade['days']} дн. Basic; "
+        f"Premium будет действовать до {upgrade['formatted_until']}."
+        if upgrade
+        else ""
+    )
     return (
         "💳 Подписка Dietnik\n\n"
         f"Текущий тариф: {current_plan}{expiry_line}\n\n"
@@ -446,22 +454,53 @@ def _format_subscription(user: dict | None) -> str:
         "Дневник · фото-учёт · AI-анализ еды · дневная цель · рекомендации\n\n"
         f"🌿 Premium — {PREMIUM_PRICE_RUB} ₽ / 30 дней\n"
         "Всё из Basic · AI-диетолог · рецепты под остаток КБЖУ · "
-        "отчёты за 7, 30 дней и весь период\n\n"
+        f"отчёты за 7, 30 дней и весь период{upgrade_line}\n\n"
         "Premium делает бота персональным ассистентом, а не просто счётчиком калорий."
     )
 
 
-def _subscription_markup(user: dict) -> InlineKeyboardMarkup:
+def _premium_upgrade_details(user: dict | None) -> dict | None:
+    if (
+        not user
+        or user.get("subscription_plan") != "basic"
+        or not _has_active_subscription(user)
+    ):
+        return None
+
+    expiry = _subscription_expiry(user)
+    if expiry is None:
+        expiry = date.today() + timedelta(days=MONTH_DAYS)
+    remaining_days = max(1, (expiry - date.today()).days)
+    full_difference = max(1, PREMIUM_PRICE_RUB - BASIC_PRICE_RUB)
+    price = int(
+        (Decimal(full_difference * remaining_days) / MONTH_DAYS)
+        .quantize(Decimal("1"), rounding=ROUND_CEILING)
+    )
+    return {
+        "price": max(1, price),
+        "days": remaining_days,
+        "subscription_until": expiry.isoformat(),
+        "formatted_until": expiry.strftime("%d.%m.%Y"),
+    }
+
+
+def _subscription_markup(
+    user: dict,
+    premium_only: bool = False,
+) -> InlineKeyboardMarkup:
     current_plan = (
         (user.get("subscription_plan") or "trial")
         if _has_active_subscription(user)
         else "trial"
     )
+    upgrade = _premium_upgrade_details(user)
     return subscription_keyboard(
         BASIC_PRICE_RUB,
         PREMIUM_PRICE_RUB,
         is_configured(),
         current_plan=current_plan,
+        premium_only=premium_only,
+        premium_upgrade_price_rub=upgrade["price"] if upgrade else None,
     )
 
 
@@ -704,11 +743,18 @@ def _format_recipe_suggestions(user: dict, remaining: dict, mode: str = "") -> s
     return "\n".join(lines)
 
 
-def _premium_required_text() -> str:
+def _premium_required_text(user: dict | None = None) -> str:
+    upgrade = _premium_upgrade_details(user)
+    price_line = (
+        f"Доплата с Basic: {upgrade['price']} ₽ за оставшиеся "
+        f"{upgrade['days']} дн., до {upgrade['formatted_until']}."
+        if upgrade
+        else f"Стоимость: {PREMIUM_PRICE_RUB} ₽ на 30 дней."
+    )
     return (
         "🌿 Эта функция входит в Premium.\n\n"
         "Premium открывает рецепты под остаток КБЖУ, отчёты и расширенного AI-диетолога.\n"
-        f"Стоимость: {PREMIUM_PRICE_RUB} ₽ на 30 дней."
+        f"{price_line}"
     )
 
 
@@ -1832,6 +1878,8 @@ async def terms_handler(message: Message) -> None:
         f"Premium: {PREMIUM_PRICE_RUB} ₽ за 30 дней.\n\n"
         "Basic открывает фото-учёт, дневник КБЖУ и рекомендации.\n"
         "Premium дополнительно открывает AI-диетолога, рецепты и отчёты.\n"
+        "При переходе с активного Basic на Premium оплачивается разница "
+        "пропорционально оставшимся дням Basic.\n"
         "После оплаты доступ активируется автоматически.\n\n"
         "Платёж является разовым и не продлевается автоматически.\n\n"
         "Dietnik помогает вести дневник питания, но не заменяет врача. "
@@ -1879,7 +1927,10 @@ async def _send_report(
         await message.answer("Сначала пройди настройку через /start.")
         return
     if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=_subscription_markup(user))
+        await message.answer(
+            _premium_required_text(user),
+            reply_markup=_subscription_markup(user, premium_only=True),
+        )
         return
 
     periods = {
@@ -1926,7 +1977,10 @@ async def recipes_handler(message: Message) -> None:
         await message.answer("Сначала пройди настройку через /start.")
         return
     if not _is_premium(user):
-        await message.answer(_premium_required_text(), reply_markup=_subscription_markup(user))
+        await message.answer(
+            _premium_required_text(user),
+            reply_markup=_subscription_markup(user, premium_only=True),
+        )
         return
 
     stats = get_today_stats(message.from_user.id)
@@ -1946,9 +2000,9 @@ async def dietitian_handler(message: Message, state: FSMContext) -> None:
         return
     if not _is_premium(user):
         await message.answer(
-            "🤖 AI-диетолог входит в Premium.\n\n"
-            "В Basic доступны фото-учёт, дневник и короткие рекомендации.",
-            reply_markup=_subscription_markup(user),
+            _premium_required_text(user)
+            + "\n\nВ Basic доступны фото-учёт, дневник и короткие рекомендации.",
+            reply_markup=_subscription_markup(user, premium_only=True),
         )
         return
     await message.answer("🤖 Напиши вопрос диетологу одним сообщением.")
@@ -1962,8 +2016,8 @@ async def dietitian_question_handler(message: Message, state: FSMContext) -> Non
         await state.clear()
         if user:
             await message.answer(
-                _premium_required_text(),
-                reply_markup=_subscription_markup(user),
+                _premium_required_text(user),
+                reply_markup=_subscription_markup(user, premium_only=True),
             )
         else:
             await message.answer("Сначала пройди настройку через /start.")
@@ -2047,6 +2101,32 @@ async def payment_unavailable_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+def _checkout_offer(user: dict, plan: str) -> dict | None:
+    base_offer = SUBSCRIPTION_OFFERS.get(plan)
+    if not base_offer:
+        return None
+
+    offer = dict(base_offer)
+    offer["subscription_until"] = _subscription_until_after_payment(user)
+    offer["is_upgrade"] = False
+
+    if plan == "premium":
+        upgrade = _premium_upgrade_details(user)
+        if upgrade:
+            offer.update(
+                {
+                    "price": upgrade["price"],
+                    "title": (
+                        "Повышение Dietnik Basic до Premium "
+                        f"до {upgrade['formatted_until']}"
+                    ),
+                    "subscription_until": upgrade["subscription_until"],
+                    "is_upgrade": True,
+                }
+            )
+    return offer
+
+
 @router.callback_query(F.data.in_({"buy_basic", "buy_premium"}))
 async def buy_subscription_handler(
     callback: CallbackQuery,
@@ -2064,12 +2144,31 @@ async def buy_subscription_handler(
     if plan == "basic" and user and _is_premium(user):
         await callback.answer("У тебя уже активен Premium", show_alert=True)
         return
+    offer = _checkout_offer(user, plan)
+    if not offer:
+        await callback.answer("Не удалось определить тариф", show_alert=True)
+        return
     await callback.answer()
     await state.clear()
     await state.set_state(PaymentCheckout.email)
-    await state.update_data(payment_plan=plan)
+    await state.update_data(
+        payment_plan=plan,
+        payment_price=offer["price"],
+        payment_title=offer["title"],
+        payment_subscription_until=offer["subscription_until"],
+        payment_is_upgrade=offer["is_upgrade"],
+    )
+    upgrade_text = (
+        "\n\nЭто доплата за оставшийся срок Basic. "
+        "Дата окончания подписки не изменится."
+        if offer["is_upgrade"]
+        else ""
+    )
     await callback.message.answer(
         "📧 Укажи email для электронного чека ЮKassa.\n\n"
+        f"Платёж: {offer['title']}\n"
+        f"Сумма: {offer['price']} ₽"
+        f"{upgrade_text}\n\n"
         "Например: name@example.com\n"
         "Для отмены отправь /cancel.",
         parse_mode=None,
@@ -2095,7 +2194,17 @@ async def payment_email_handler(
     plan = data.get("payment_plan")
     offer = SUBSCRIPTION_OFFERS.get(plan)
     user = get_user(message.from_user.id)
-    if not offer or not user:
+    price = data.get("payment_price")
+    title = data.get("payment_title")
+    subscription_until = data.get("payment_subscription_until")
+    if (
+        not offer
+        or not user
+        or not isinstance(price, int)
+        or price <= 0
+        or not title
+        or not subscription_until
+    ):
         await state.clear()
         await message.answer(
             "Не удалось восстановить выбранный тариф. Открой раздел «Подписка» ещё раз.",
@@ -2105,7 +2214,7 @@ async def payment_email_handler(
         return
 
     payload = _new_payment_payload(message.from_user.id, plan)
-    amount = offer["price"] * 100
+    amount = price * 100
     try:
         save_payment_intent(
             payload=payload,
@@ -2114,13 +2223,14 @@ async def payment_email_handler(
             amount=amount,
             currency="RUB",
             customer_email=email,
+            subscription_until=subscription_until,
         )
         payment = await asyncio.to_thread(
             create_payment,
             payload,
             message.from_user.id,
             plan,
-            offer["title"],
+            title,
             amount,
             email,
         )
@@ -2160,8 +2270,8 @@ async def payment_email_handler(
     await message.answer(
         ("🧪 Тестовый платёж ЮKassa\n\n" if YOOKASSA_TEST_MODE else "")
         + "✅ Ссылка на оплату готова\n\n"
-        f"Тариф: {offer['title']}\n"
-        f"Сумма: {offer['price']} ₽\n"
+        f"Платёж: {title}\n"
+        f"Сумма: {price} ₽\n"
         f"Чек придёт на: {email}\n\n"
         "После оплаты ничего нажимать не нужно. "
         "Я автоматически подтвержу платёж и сразу сообщу об активации.",
@@ -2169,7 +2279,7 @@ async def payment_email_handler(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text=f"Оплатить {offer['price']} ₽",
+                        text=f"Оплатить {price} ₽",
                         url=confirmation_url,
                     )
                 ]
@@ -2252,7 +2362,17 @@ async def _activate_direct_payment(
         )
         return
 
-    subscription_until = _subscription_until_after_payment(user)
+    subscription_until = (
+        intent.get("subscription_until")
+        or _subscription_until_after_payment(user)
+    )
+    current_expiry = _subscription_expiry(user)
+    try:
+        target_expiry = date.fromisoformat(subscription_until)
+    except ValueError:
+        target_expiry = date.today()
+    if current_expiry and current_expiry > target_expiry:
+        subscription_until = current_expiry.isoformat()
     inserted = activate_subscription_payment(
         telegram_id=intent["telegram_id"],
         plan=intent["plan"],

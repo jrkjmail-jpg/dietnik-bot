@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -121,6 +122,37 @@ class YooKassaServiceTests(unittest.TestCase):
         self.assertEqual(args[0], 1001)
         self.assertIn("Оплата прошла успешно", args[1])
         self.assertIn("Basic", args[1])
+
+    def test_basic_user_gets_prorated_premium_upgrade(self) -> None:
+        expiry = date.today() + timedelta(days=15)
+        user = {
+            "subscription_plan": "basic",
+            "subscription_until": expiry.isoformat(),
+            "premium_until": None,
+        }
+
+        upgrade = main._premium_upgrade_details(user)
+        offer = main._checkout_offer(user, "premium")
+        with patch.object(main, "is_configured", return_value=True):
+            markup = main._subscription_markup(user, premium_only=True)
+        buttons = [
+            button
+            for row in markup.inline_keyboard
+            for button in row
+        ]
+
+        expected_price = (
+            (main.PREMIUM_PRICE_RUB - main.BASIC_PRICE_RUB) * 15 + 29
+        ) // 30
+        self.assertEqual(upgrade["price"], expected_price)
+        self.assertEqual(offer["price"], expected_price)
+        self.assertEqual(offer["subscription_until"], expiry.isoformat())
+        self.assertTrue(offer["is_upgrade"])
+        self.assertFalse(any(button.callback_data == "buy_basic" for button in buttons))
+        self.assertTrue(any(button.callback_data == "buy_premium" for button in buttons))
+        self.assertTrue(
+            any(str(expected_price) in button.text for button in buttons)
+        )
 
 
 if __name__ == "__main__":

@@ -149,7 +149,8 @@ def init_db() -> None:
                 paid_at TEXT,
                 error_message TEXT,
                 yookassa_payment_id TEXT,
-                confirmation_url TEXT
+                confirmation_url TEXT,
+                notification_sent_at TEXT
             )
             """
         )
@@ -193,6 +194,20 @@ def init_db() -> None:
         _ensure_column(conn, "payment_intents", "error_message", "TEXT")
         _ensure_column(conn, "payment_intents", "yookassa_payment_id", "TEXT")
         _ensure_column(conn, "payment_intents", "confirmation_url", "TEXT")
+        notification_column_added = _ensure_column(
+            conn,
+            "payment_intents",
+            "notification_sent_at",
+            "TEXT",
+        )
+        if notification_column_added:
+            conn.execute(
+                """
+                UPDATE payment_intents
+                SET notification_sent_at = COALESCE(paid_at, created_at)
+                WHERE status = 'paid'
+                """
+            )
         conn.execute(
             """
             DELETE FROM subscriptions
@@ -221,12 +236,14 @@ def _ensure_column(
     table_name: str,
     column_name: str,
     column_definition: str,
-) -> None:
+) -> bool:
     columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     if column_name not in {column["name"] for column in columns}:
         conn.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
         )
+        return True
+    return False
 
 
 def get_app_state(key: str) -> Optional[str]:
@@ -490,6 +507,53 @@ def get_payment_intent(payload: str) -> Optional[dict]:
             (payload,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def get_pending_payment_intents(limit: int = 100) -> list[dict]:
+    """Return YooKassa payments that still need automatic status checks."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM payment_intents
+            WHERE yookassa_payment_id IS NOT NULL
+              AND yookassa_payment_id != ''
+              AND status IN ('created', 'pending', 'waiting_for_capture')
+            ORDER BY created_at
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_unnotified_paid_intents(limit: int = 100) -> list[dict]:
+    """Return activated payments whose success message still needs delivery."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM payment_intents
+            WHERE status = 'paid'
+              AND notification_sent_at IS NULL
+            ORDER BY paid_at, created_at
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_payment_notification_sent(payload: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE payment_intents
+            SET notification_sent_at = ?
+            WHERE payload = ?
+            """,
+            (_now(), payload),
+        )
 
 
 def mark_payment_intent_failed(payload: str, error_message: str) -> None:

@@ -19,7 +19,7 @@ LEGACY_DB_PATH = BASE_DIR / "dietnik.sqlite3"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@bothostru")
-BOT_RELEASE = os.getenv("BOT_RELEASE", "2026.06.09-yookassa-api-1")
+BOT_RELEASE = os.getenv("BOT_RELEASE", "2026.06.13-auto-payments-1")
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
 YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://t.me/").strip()
@@ -42,7 +42,12 @@ def _get_bool_env(name: str, default: bool) -> bool:
     return raw_value.strip().casefold() in {"1", "true", "yes", "да", "on"}
 
 
-AUTO_DB_BACKUP_INTERVAL_HOURS = _get_int_env("AUTO_DB_BACKUP_INTERVAL_HOURS", 6)
+_AUTO_DB_BACKUP_ENABLED = _get_int_env("AUTO_DB_BACKUP_INTERVAL_HOURS", 24) > 0
+AUTO_DB_BACKUP_INTERVAL_HOURS = 24 if _AUTO_DB_BACKUP_ENABLED else 0
+PAYMENT_CHECK_INTERVAL_SECONDS = max(
+    5,
+    _get_int_env("PAYMENT_CHECK_INTERVAL_SECONDS", 10),
+)
 BASIC_PRICE_RUB = max(1, _get_int_env("BASIC_PRICE_RUB", 490))
 PREMIUM_PRICE_RUB = max(1, _get_int_env("PREMIUM_PRICE_RUB", 890))
 YOOKASSA_VAT_CODE = min(6, max(1, _get_int_env("YOOKASSA_VAT_CODE", 1)))

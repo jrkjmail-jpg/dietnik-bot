@@ -33,6 +33,7 @@ from config import (
     DATA_DIR,
     DB_PATH,
     OPENAI_API_KEY,
+    PAYMENT_CHECK_INTERVAL_SECONDS,
     PERSISTENCE_PATH,
     PREMIUM_PRICE_RUB,
     SUPPORT_ADMIN_CHAT_ID,
@@ -66,13 +67,15 @@ from database import (
     get_user_meals,
     get_users_page,
     get_period_stats,
-    get_payment_intent,
+    get_pending_payment_intents,
+    get_unnotified_paid_intents,
     init_db,
     ensure_support_thread,
     get_recent_support_messages,
     log_support_message,
     mark_payment_intent_failed,
     mark_payment_intent_status,
+    mark_payment_notification_sent,
     mark_trial_used,
     remember_support_admin_message,
     reset_today,
@@ -1212,6 +1215,18 @@ async def _maybe_auto_backup_db(bot: Bot, reason: str) -> None:
     set_app_state("last_auto_db_backup_at", now.isoformat(timespec="seconds"))
 
 
+async def _daily_backup_loop(bot: Bot) -> None:
+    """Check hourly whether the single scheduled daily backup is due."""
+    while True:
+        try:
+            await _maybe_auto_backup_db(bot, "ежедневное резервное копирование")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Daily DB backup loop failed")
+        await asyncio.sleep(60 * 60)
+
+
 def _parse_int(text: str) -> int | None:
     try:
         value = int(text.strip())
@@ -2148,7 +2163,8 @@ async def payment_email_handler(
         f"Тариф: {offer['title']}\n"
         f"Сумма: {offer['price']} ₽\n"
         f"Чек придёт на: {email}\n\n"
-        "После оплаты нажми «Проверить оплату».",
+        "После оплаты ничего нажимать не нужно. "
+        "Я автоматически подтвержу платёж и сразу сообщу об активации.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -2156,13 +2172,7 @@ async def payment_email_handler(
                         text=f"Оплатить {offer['price']} ₽",
                         url=confirmation_url,
                     )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Проверить оплату",
-                        callback_data=f"paycheck:{payload}",
-                    )
-                ],
+                ]
             ]
         ),
         parse_mode=None,
@@ -2205,30 +2215,28 @@ def _validate_direct_payment(intent: dict, payment: dict) -> str | None:
 
 
 async def _activate_direct_payment(
-    message: Message,
     bot: Bot,
     intent: dict,
     payment: dict,
 ) -> None:
     user = get_user(intent["telegram_id"])
     if not user:
-        await message.answer("Профиль пользователя не найден. Напиши /paysupport.")
+        mark_payment_intent_failed(intent["payload"], "user_not_found")
+        logger.error(
+            "Could not activate payment payload=%s: user not found",
+            intent["payload"],
+        )
         return
     validation_error = _validate_direct_payment(intent, payment)
     if validation_error == "not_paid":
         payment_status = payment.get("status") or "pending"
         mark_payment_intent_status(intent["payload"], payment_status)
         if payment_status == "canceled":
-            await message.answer(
+            await bot.send_message(
+                intent["telegram_id"],
                 "Платёж отменён ЮKassa. Открой раздел «Подписка» и создай новую ссылку.",
                 reply_markup=main_menu_keyboard(),
             )
-            return
-        await message.answer(
-            "Платёж пока не подтверждён ЮKassa. Если ты только что оплатил, "
-            "подожди несколько секунд и нажми кнопку ещё раз.",
-            parse_mode=None,
-        )
         return
     if validation_error:
         mark_payment_intent_failed(intent["payload"], validation_error)
@@ -2237,10 +2245,10 @@ async def _activate_direct_payment(
             intent["payload"],
             validation_error,
         )
-        await message.answer(
+        await bot.send_message(
+            intent["telegram_id"],
             "Параметры платежа не прошли проверку. Деньги и доступ автоматически "
             "не менялись. Напиши /paysupport.",
-            parse_mode=None,
         )
         return
 
@@ -2257,47 +2265,99 @@ async def _activate_direct_payment(
         customer_email=intent["customer_email"],
     )
     if not inserted:
-        await message.answer(
-            "✅ Этот платёж уже обработан. Подписка остаётся активной.",
-            reply_markup=main_menu_keyboard(),
-        )
         return
 
+
+    await _send_payment_success_notification(
+        bot,
+        intent,
+        subscription_until,
+    )
+
+
+async def _send_payment_success_notification(
+    bot: Bot,
+    intent: dict,
+    subscription_until: str,
+) -> None:
     offer = SUBSCRIPTION_OFFERS[intent["plan"]]
-    await message.answer(
+    try:
+        formatted_until = date.fromisoformat(subscription_until).strftime("%d.%m.%Y")
+    except ValueError:
+        formatted_until = subscription_until
+    await bot.send_message(
+        intent["telegram_id"],
         "✅ Оплата прошла успешно!\n\n"
-        f"{offer['title']} активирован до {subscription_until}.\n"
-        "Спасибо, что поддерживаешь Dietnik.",
+        f"{offer['title']} активирован до {formatted_until}.\n"
+        "Доступ ко всем функциям тарифа уже открыт.\n\n"
+        "Спасибо, что выбираешь Dietnik.",
         reply_markup=main_menu_keyboard(),
     )
-    await _maybe_auto_backup_db(bot, "successful_payment")
+    mark_payment_notification_sent(intent["payload"])
+
+
+async def _process_pending_payments(bot: Bot) -> None:
+    for intent in get_unnotified_paid_intents():
+        user = get_user(intent["telegram_id"])
+        subscription_until = (
+            user.get("subscription_until") or user.get("premium_until")
+            if user
+            else None
+        )
+        if not subscription_until:
+            logger.error(
+                "Could not deliver payment notification payload=%s: expiry not found",
+                intent["payload"],
+            )
+            continue
+        try:
+            await _send_payment_success_notification(
+                bot,
+                intent,
+                subscription_until,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Payment notification delivery failed payload=%s: %s",
+                intent["payload"],
+                exc,
+            )
+
+    intents = get_pending_payment_intents()
+    for intent in intents:
+        try:
+            payment = await asyncio.to_thread(
+                get_payment,
+                intent["yookassa_payment_id"],
+            )
+            await _activate_direct_payment(bot, intent, payment)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Automatic YooKassa check failed payload=%s: %s",
+                intent["payload"],
+                exc,
+            )
+
+
+async def _payment_monitor_loop(bot: Bot) -> None:
+    """Automatically activate subscriptions shortly after YooKassa confirms them."""
+    while True:
+        try:
+            await _process_pending_payments(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("YooKassa payment monitor failed")
+        await asyncio.sleep(PAYMENT_CHECK_INTERVAL_SECONDS)
 
 
 @router.callback_query(F.data.startswith("paycheck:"))
 async def check_yookassa_payment_handler(callback: CallbackQuery, bot: Bot) -> None:
-    await callback.answer()
-    payload = callback.data.removeprefix("paycheck:")
-    intent = get_payment_intent(payload)
-    if not intent or intent["telegram_id"] != callback.from_user.id:
-        await callback.message.answer("Этот платёж не найден или принадлежит другому пользователю.")
-        return
-    if intent["status"] == "paid":
-        await callback.message.answer("✅ Этот платёж уже обработан, подписка активна.")
-        return
-    if not intent.get("yookassa_payment_id"):
-        await callback.message.answer("У платежа нет ID ЮKassa. Создай новый счёт.")
-        return
-    try:
-        payment = await asyncio.to_thread(get_payment, intent["yookassa_payment_id"])
-    except Exception as exc:
-        error_text = f"{type(exc).__name__}: {exc}"
-        logger.exception("Could not check YooKassa payment payload=%s", payload)
-        await _notify_payment_error(bot, callback.from_user.id, intent["plan"], error_text)
-        await callback.message.answer(
-            "Не удалось проверить платёж в ЮKassa. Попробуй через минуту или напиши /paysupport."
-        )
-        return
-    await _activate_direct_payment(callback.message, bot, intent, payment)
+    await callback.answer("Теперь оплата проверяется автоматически", show_alert=True)
 
 
 @router.message(Command("admin", "admin_help"))
@@ -2581,7 +2641,6 @@ async def admin_grant_premium_handler(message: Message, bot: Bot) -> None:
     premium_until = (datetime.now() + timedelta(days=days)).date().isoformat()
     set_subscription(telegram_id, "premium", premium_until)
     await message.answer(f"✅ Premium выдан пользователю {telegram_id} до {premium_until}.")
-    await _maybe_auto_backup_db(bot, "admin_grant_premium")
 
 
 @router.message(Command("admin_grant_basic"))
@@ -2608,7 +2667,6 @@ async def admin_grant_basic_handler(message: Message, bot: Bot) -> None:
     await message.answer(
         f"✅ Basic выдан пользователю {telegram_id} до {subscription_until}."
     )
-    await _maybe_auto_backup_db(bot, "admin_grant_basic")
 
 
 @router.message(Command("admin_revoke_premium", "admin_revoke_subscription"))
@@ -2631,7 +2689,6 @@ async def admin_revoke_premium_handler(message: Message, bot: Bot) -> None:
     set_subscription(telegram_id, "trial", None)
     mark_trial_used(telegram_id)
     await message.answer(f"✅ Платный доступ пользователя {telegram_id} отключён.")
-    await _maybe_auto_backup_db(bot, "admin_revoke_premium")
 
 
 @router.message(Command("admin_reset_day"))
@@ -3038,7 +3095,16 @@ async def main() -> None:
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Webhook deleted, starting polling")
-    await dp.start_polling(bot)
+    background_tasks = [
+        asyncio.create_task(_payment_monitor_loop(bot)),
+        asyncio.create_task(_daily_backup_loop(bot)),
+    ]
+    try:
+        await dp.start_polling(bot)
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":

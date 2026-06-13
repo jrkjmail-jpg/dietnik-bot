@@ -1,7 +1,8 @@
+import asyncio
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1] / "dietnik_bot"
@@ -78,6 +79,48 @@ class YooKassaServiceTests(unittest.TestCase):
             main._validate_direct_payment(intent, payment),
             "amount_mismatch",
         )
+
+    def test_successful_payment_is_activated_and_user_is_notified(self) -> None:
+        intent = {
+            "payload": "dietnik:basic:30:1001:auto",
+            "telegram_id": 1001,
+            "plan": "basic",
+            "amount": 49000,
+            "currency": "RUB",
+            "customer_email": "user@example.com",
+            "yookassa_payment_id": "yk-auto-1",
+        }
+        payment = {
+            "id": "yk-auto-1",
+            "status": "succeeded",
+            "paid": True,
+            "amount": {"value": "490.00", "currency": "RUB"},
+            "metadata": {
+                "local_payment_id": intent["payload"],
+                "telegram_id": "1001",
+                "plan": "basic",
+            },
+        }
+        bot = AsyncMock()
+        user = {
+            "telegram_id": 1001,
+            "subscription_until": None,
+            "premium_until": None,
+        }
+
+        with (
+            patch.object(main, "get_user", return_value=user),
+            patch.object(main, "activate_subscription_payment", return_value=True),
+            patch.object(main, "mark_payment_notification_sent") as mark_notified,
+        ):
+            asyncio.run(main._activate_direct_payment(bot, intent, payment))
+
+        bot.send_message.assert_awaited_once()
+        mark_notified.assert_called_once_with(intent["payload"])
+        args = bot.send_message.await_args.args
+        self.assertEqual(args[0], 1001)
+        self.assertIn("Оплата прошла успешно", args[1])
+        self.assertIn("Basic", args[1])
 
 
 if __name__ == "__main__":

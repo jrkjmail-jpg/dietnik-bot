@@ -98,6 +98,10 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(pending_intent["yookassa_payment_id"], "yk-payment-1")
         self.assertEqual(pending_intent["status"], "pending")
+        pending = database.get_pending_payment_intents()
+        self.assertEqual([item["payload"] for item in pending], [
+            "dietnik:basic:30:1001:paid"
+        ])
         first = database.activate_subscription_payment(
             telegram_id=1001,
             plan="basic",
@@ -131,6 +135,13 @@ class DatabaseTests(unittest.TestCase):
         intent = database.get_payment_intent("dietnik:basic:30:1001:paid")
         self.assertEqual(intent["status"], "paid")
         self.assertEqual(intent["customer_email"], "user@example.com")
+        self.assertEqual(database.get_pending_payment_intents(), [])
+        self.assertEqual(
+            [item["payload"] for item in database.get_unnotified_paid_intents()],
+            ["dietnik:basic:30:1001:paid"],
+        )
+        database.mark_payment_notification_sent(intent["payload"])
+        self.assertEqual(database.get_unnotified_paid_intents(), [])
         attempts = database.get_recent_payment_intents()
         self.assertEqual(
             {attempt["status"] for attempt in attempts},
